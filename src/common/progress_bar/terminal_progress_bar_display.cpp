@@ -1,7 +1,10 @@
 #include "duckdb/common/progress_bar/display/terminal_progress_bar_display.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/to_string.hpp"
-
+#include <iostream>
+#include <fstream>
+#include <iomanip>
+#include <limits>
 namespace duckdb {
 
 int32_t TerminalProgressBarDisplay::NormalizePercentage(double percentage) {
@@ -122,16 +125,32 @@ void TerminalProgressBarDisplay::Update(double percentage) {
 	const double filter_percentage = percentage / 100.0;
 	ukf.Update(filter_percentage, current_time);
 
-	double estimated_seconds_remaining = ukf.GetEstimatedRemainingSeconds();
-	auto percentage_int = NormalizePercentage(percentage);
-	PrintProgressInternal(percentage_int, estimated_seconds_remaining);
-	Printer::Flush(OutputStream::STREAM_STDOUT);
+	if (current_time - last_update_time > 0.1 && percentage != 100.0) {
+		double estimated_seconds_remaining = ukf.GetEstimatedRemainingSeconds();
+		auto percentage_int = NormalizePercentage(percentage);
+		PrintProgressInternal(percentage_int, estimated_seconds_remaining);
+		Printer::Flush(OutputStream::STREAM_STDOUT);
+		last_update_time = current_time;
+		measurements.emplace_back(current_time, percentage);
+	}
 }
 
 void TerminalProgressBarDisplay::Finish() {
-	PrintProgressInternal(100, GetElapsedDuration(), true);
+	const double current_time = GetElapsedDuration();
+
+	PrintProgressInternal(100, current_time, true);
+	measurements.emplace_back(current_time, 100.0);
 	Printer::RawPrint(OutputStream::STREAM_STDOUT, "\n");
 	Printer::Flush(OutputStream::STREAM_STDOUT);
+
+	// Now write all of the measurements to a file.
+	std::ofstream file("progress_bar_measurements.txt");
+	file << "elapsed_time,progress\n";
+	file << std::setprecision(std::numeric_limits<double>::digits10 + 1);
+	for (const auto &measurement : measurements) {
+		file << measurement.first << "," << measurement.second << std::endl;
+	}
+	file.close();
 }
 
 } // namespace duckdb
