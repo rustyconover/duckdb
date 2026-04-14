@@ -47,6 +47,7 @@ struct ShellProgressBar;
 struct PagerState;
 struct ShellTableInfo;
 struct RenderingQueryResult;
+struct AIConversationState;
 enum class HighlightElementType : uint32_t;
 
 using idx_t = uint64_t;
@@ -282,6 +283,8 @@ public:
 	bool pager_is_active = false;
 	//! Shell highlighting mode
 	HighlightMode highlight_mode = HighlightMode::AUTOMATIC;
+	//! AI conversation state (persists across .ai invocations)
+	unique_ptr<AIConversationState> ai_conversation;
 
 public:
 	ShellState();

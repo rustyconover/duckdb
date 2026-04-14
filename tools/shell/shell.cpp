@@ -85,6 +85,7 @@
 #endif
 
 #include "duckdb.hpp"
+#include "shell_ai.hpp"
 #include "shell_renderer.hpp"
 #include "shell_highlight.hpp"
 #include "shell_state.hpp"
@@ -1891,6 +1892,7 @@ bool ShellState::OpenDatabase(const vector<string> &args) {
 	/* Close the existing database */
 	db.reset();
 	conn.reset();
+	ai_conversation.reset();
 
 	if (!zNewFilename.empty()) {
 		if (newFlag) {

@@ -14,9 +14,11 @@ include_directories(linenoise/include)
 add_definitions(-DUSE_DUCKDB_SHELL_WRAPPER)
 
 include_directories(../../third_party/utf8proc/include)
+include_directories(../../third_party/yyjson/include)
 
 set(SHELL_SOURCES
     ${SHELL_SOURCES}
+    shell_ai.cpp
     shell_command_line_option.cpp
     shell_extension.cpp
     shell.cpp

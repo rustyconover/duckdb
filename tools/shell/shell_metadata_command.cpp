@@ -1,4 +1,5 @@
 #include "shell_state.hpp"
+#include "shell_ai.hpp"
 #include "shell_highlight.hpp"
 #include "shell_prompt.hpp"
 #include "shell_progress_bar.hpp"
@@ -820,6 +821,12 @@ MetadataResult SetPager(ShellState &state, const vector<string> &args) {
 
 static const MetadataCommand metadata_commands[] = {
     {"about", 0, ToggleAbout, "", "Show information about DuckDB", 0, ""},
+    {"ask", 0, RunAIMode, "?MESSAGE?", "Ask AI a question about your data", 0,
+     "Requires ANTHROPIC_API_KEY environment variable.\n"
+     "\t.ask\tEnter interactive ask mode\n"
+     "\t.ask <question>\tAsk a single question\n"
+     "\t.ask new\tStart new conversation\n"
+     "\t.ask clear\tClear conversation history"},
 #ifdef HAVE_LINENOISE
     {"auto_format", 2, ToggleAutoFormat, "on|off", "Automatically format SQL before execution.  Default OFF", 3, ""},
 #endif
