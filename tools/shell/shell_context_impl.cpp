@@ -74,6 +74,16 @@ void ShellContextImpl::ClearInterrupt() {
 // Rendering
 // ---------------------------------------------------------------------------
 
+duckdb::idx_t ShellContextImpl::GetTerminalWidth() {
+#ifdef HAVE_LINENOISE
+	auto term_size = duckdb::Terminal::GetTerminalSize();
+	if (term_size.ws_col > 0) {
+		return static_cast<duckdb::idx_t>(term_size.ws_col);
+	}
+#endif
+	return 0;
+}
+
 void ShellContextImpl::RenderQueryResult(duckdb::QueryResult &result) {
 	auto renderer = state.GetRenderer();
 	state.RenderQueryResult(*renderer, result);
@@ -211,11 +221,11 @@ void ShellContextImpl::LoadShellHistory(const duckdb::string &path) {
 // Extension data storage
 // ---------------------------------------------------------------------------
 
-void ShellContextImpl::SetExtensionData(const duckdb::string &key, duckdb::shared_ptr<void> data) {
+void ShellContextImpl::SetExtensionData(const duckdb::string &key, duckdb::shared_ptr<duckdb::ShellExtensionData> data) {
 	extension_data[key] = std::move(data);
 }
 
-duckdb::shared_ptr<void> ShellContextImpl::GetExtensionData(const duckdb::string &key) {
+duckdb::shared_ptr<duckdb::ShellExtensionData> ShellContextImpl::GetExtensionData(const duckdb::string &key) {
 	auto it = extension_data.find(key);
 	if (it == extension_data.end()) {
 		return nullptr;

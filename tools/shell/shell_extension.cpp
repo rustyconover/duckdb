@@ -1,4 +1,5 @@
 #include "shell_extension.hpp"
+#include "shell_ai.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/common/vector_operations/unary_executor.hpp"
 #include "duckdb/main/config.hpp"
@@ -56,6 +57,9 @@ void ShellExtension::Load(ExtensionLoader &loader) {
 	auto &config = duckdb::DBConfig::GetConfig(loader.GetDatabaseInstance());
 	config.SetOptionByName("duckdb_api", DUCKDB_API_CLI);
 	config.replacement_scans.push_back(duckdb::ReplacementScan(duckdb::ShellScanLastResult));
+
+	// Register AI shell command (.ask)
+	duckdb_shell::RegisterAIShellCommand(config);
 }
 
 std::string ShellExtension::Name() {

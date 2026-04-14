@@ -48,6 +48,9 @@ public:
 	bool IsInterrupted() const override;
 	void ClearInterrupt() override;
 
+	// Terminal
+	duckdb::idx_t GetTerminalWidth() override;
+
 	// Rendering
 	void RenderQueryResult(duckdb::QueryResult &result) override;
 	void HighlightSQL(duckdb::string &sql) override;
@@ -69,13 +72,13 @@ public:
 	void LoadShellHistory(const duckdb::string &path) override;
 
 	// Extension data storage
-	void SetExtensionData(const duckdb::string &key, duckdb::shared_ptr<void> data) override;
-	duckdb::shared_ptr<void> GetExtensionData(const duckdb::string &key) override;
+	void SetExtensionData(const duckdb::string &key, duckdb::shared_ptr<duckdb::ShellExtensionData> data) override;
+	duckdb::shared_ptr<duckdb::ShellExtensionData> GetExtensionData(const duckdb::string &key) override;
 
 private:
 	ShellState &state;
-	//! Type-erased extension data, keyed by extension name
-	duckdb::case_insensitive_map_t<duckdb::shared_ptr<void>> extension_data;
+	//! Extension data, keyed by extension name
+	duckdb::case_insensitive_map_t<duckdb::shared_ptr<duckdb::ShellExtensionData>> extension_data;
 	//! Stack of saved input modes for nested EnterExtensionInputMode calls
 	duckdb::vector<SavedInputMode> saved_input_modes;
 	//! Whether the last ReadLine returned due to EOF

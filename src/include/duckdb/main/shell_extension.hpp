@@ -25,6 +25,15 @@ class QueryResult;
 struct DBConfig;
 
 //===--------------------------------------------------------------------===//
+// ShellExtensionData -- base class for extension-stored data
+//===--------------------------------------------------------------------===//
+//! Base class for data stored via ShellContext::SetExtensionData/GetExtensionData.
+//! Extensions subclass this and cast back to their type on retrieval.
+struct ShellExtensionData {
+	virtual ~ShellExtensionData() = default;
+};
+
+//===--------------------------------------------------------------------===//
 // ShellContext -- abstract interface to the shell environment
 //===--------------------------------------------------------------------===//
 //! ShellContext provides the abstract interface that shell extension commands
@@ -59,6 +68,12 @@ public:
 	virtual bool IsInterrupted() const = 0;
 	//! Clear the interrupt flag
 	virtual void ClearInterrupt() = 0;
+
+	//===--------------------------------------------------------------------===//
+	// Terminal
+	//===--------------------------------------------------------------------===//
+	//! Get the terminal width in columns (0 if unknown)
+	virtual idx_t GetTerminalWidth() = 0;
 
 	//===--------------------------------------------------------------------===//
 	// Rendering
@@ -109,11 +124,11 @@ public:
 	// Extension data storage
 	//===--------------------------------------------------------------------===//
 	//! Store opaque extension data keyed by name. The data persists for the
-	//! lifetime of the shell session. Uses shared_ptr<void> for type erasure --
-	//! the extension is responsible for casting back to the correct type.
-	virtual void SetExtensionData(const string &key, shared_ptr<void> data) = 0;
+	//! lifetime of the shell session. Extensions subclass ShellExtensionData
+	//! for their state and are responsible for casting back to the correct type.
+	virtual void SetExtensionData(const string &key, shared_ptr<ShellExtensionData> data) = 0;
 	//! Retrieve previously stored extension data (nullptr if not found)
-	virtual shared_ptr<void> GetExtensionData(const string &key) = 0;
+	virtual shared_ptr<ShellExtensionData> GetExtensionData(const string &key) = 0;
 };
 
 //===--------------------------------------------------------------------===//
