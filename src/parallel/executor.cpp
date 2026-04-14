@@ -433,20 +433,23 @@ void Executor::CancelTasks() {
 		lock_guard<mutex> elock(executor_lock);
 		// mark the query as cancelled so tasks will early-out
 		cancelled = true;
-		// destroy all pipelines, events and states
-		for (auto &rec_cte_ref : recursive_ctes) {
-			auto &rec_cte = rec_cte_ref.get().Cast<PhysicalRecursiveCTE>();
-			rec_cte.recursive_meta_pipeline.reset();
-		}
-		pipelines.clear();
-		root_pipelines.clear();
 		to_be_rescheduled_tasks.clear();
-		events.clear();
 	}
-	// Take all pending tasks and execute them until they cancel
+	// Drain all tasks first — they hold references to pipelines/events/states,
+	// so those must stay alive until all tasks have completed
 	while (executor_tasks > 0) {
 		WorkOnTasks();
 	}
+	// Now safe to destroy pipelines, events and states — no tasks reference them
+	lock_guard<mutex> elock(executor_lock);
+	for (auto &rec_cte_ref : recursive_ctes) {
+		auto &rec_cte = rec_cte_ref.get().Cast<PhysicalRecursiveCTE>();
+		rec_cte.recursive_meta_pipeline.reset();
+	}
+	pipelines.clear();
+	root_pipelines.clear();
+	to_be_rescheduled_tasks.clear();
+	events.clear();
 }
 
 void Executor::WorkOnTasks() {
@@ -539,7 +542,9 @@ void Executor::AddToBeRescheduled(shared_ptr<Task> &task_p) {
 	if (to_be_rescheduled_tasks.find(task_p.get()) != to_be_rescheduled_tasks.end()) {
 		return;
 	}
-	to_be_rescheduled_tasks[task_p.get()] = std::move(task_p);
+	// Save raw pointer before move — evaluation order of operator[] key and assignment value is unspecified pre-C++17
+	auto raw_ptr = task_p.get();
+	to_be_rescheduled_tasks[raw_ptr] = std::move(task_p);
 }
 
 bool Executor::ExecutionIsFinished() {

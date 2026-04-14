@@ -87,6 +87,16 @@ private:
 // Start of the auto-generated list of settings structures
 //===----------------------------------------------------------------------===//
 
+struct DeltaOnlyVariantEncodingEnabledSetting {
+	using RETURN_TYPE = bool;
+	static constexpr const char *Name = "__delta_only_variant_encoding_enabled";
+	static constexpr const char *Description = "Enables the Parquet reader to identify a Variant structurally.";
+	static constexpr const char *InputType = "BOOLEAN";
+	static void SetGlobal(DatabaseInstance *db, DBConfig &config, const Value &parameter);
+	static void ResetGlobal(DatabaseInstance *db, DBConfig &config);
+	static Value GetSetting(const ClientContext &context);
+};
+
 struct AccessModeSetting {
 	using RETURN_TYPE = AccessMode;
 	static constexpr const char *Name = "access_mode";
@@ -1537,6 +1547,19 @@ struct UsernameSetting {
 	static constexpr idx_t SettingIndex = 89;
 };
 
+struct VacuumRebuildIndexesSetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "vacuum_rebuild_indexes";
+	static constexpr const char *Description =
+	    "(Experimental) Allow vacuum to compact row groups on tables with bound ART indexes, rebuilding the indexes "
+	    "afterward. Tables with a row count exceeding this threshold are skipped. 0 = disabled.";
+	static constexpr const char *InputType = "UBIGINT";
+	static constexpr const char *DefaultValue = "0";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::GLOBAL_DEFAULT;
+	static constexpr idx_t SettingIndex = 90;
+	static void OnSet(SettingCallbackInfo &info, Value &input);
+};
+
 struct ValidateExternalFileCacheSetting {
 	using RETURN_TYPE = CacheValidationMode;
 	static constexpr const char *Name = "validate_external_file_cache";
@@ -1546,7 +1569,7 @@ struct ValidateExternalFileCacheSetting {
 	static constexpr const char *InputType = "VARCHAR";
 	static constexpr const char *DefaultValue = "VALIDATE_ALL";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::GLOBAL_DEFAULT;
-	static constexpr idx_t SettingIndex = 90;
+	static constexpr idx_t SettingIndex = 91;
 	static void OnSet(SettingCallbackInfo &info, Value &input);
 };
 
@@ -1558,7 +1581,7 @@ struct VariantMinimumShreddingSizeSetting {
 	static constexpr const char *InputType = "BIGINT";
 	static constexpr const char *DefaultValue = "30000";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::GLOBAL_ONLY;
-	static constexpr idx_t SettingIndex = 91;
+	static constexpr idx_t SettingIndex = 92;
 };
 
 struct WalAutocheckpointEntriesSetting {
@@ -1569,7 +1592,7 @@ struct WalAutocheckpointEntriesSetting {
 	static constexpr const char *InputType = "UBIGINT";
 	static constexpr const char *DefaultValue = "0";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::GLOBAL_DEFAULT;
-	static constexpr idx_t SettingIndex = 92;
+	static constexpr idx_t SettingIndex = 93;
 };
 
 struct WarningsAsErrorsSetting {
@@ -1579,7 +1602,7 @@ struct WarningsAsErrorsSetting {
 	static constexpr const char *InputType = "BOOLEAN";
 	static constexpr const char *DefaultValue = "false";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::GLOBAL_ONLY;
-	static constexpr idx_t SettingIndex = 93;
+	static constexpr idx_t SettingIndex = 94;
 	static void OnSet(SettingCallbackInfo &info, Value &input);
 };
 
@@ -1591,7 +1614,7 @@ struct WriteBufferRowGroupCountSetting {
 	static constexpr const char *InputType = "UBIGINT";
 	static constexpr const char *DefaultValue = "5";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::GLOBAL_DEFAULT;
-	static constexpr idx_t SettingIndex = 94;
+	static constexpr idx_t SettingIndex = 95;
 };
 
 struct ZstdMinStringLengthSetting {
@@ -1602,11 +1625,11 @@ struct ZstdMinStringLengthSetting {
 	static constexpr const char *InputType = "UBIGINT";
 	static constexpr const char *DefaultValue = "4096";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::GLOBAL_ONLY;
-	static constexpr idx_t SettingIndex = 95;
+	static constexpr idx_t SettingIndex = 96;
 };
 
 struct GeneratedSettingInfo {
-	static constexpr idx_t MaxSettingIndex = 96;
+	static constexpr idx_t MaxSettingIndex = 97;
 };
 
 //===----------------------------------------------------------------------===//

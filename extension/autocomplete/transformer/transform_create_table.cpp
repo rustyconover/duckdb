@@ -14,6 +14,7 @@
 #include "duckdb/parser/parsed_data/create_secret_info.hpp"
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/parser/expression/cast_expression.hpp"
+#include "duckdb/parser/expression/type_expression.hpp"
 
 namespace duckdb {
 
@@ -98,7 +99,7 @@ CreateTableAs PEGTransformerFactory::TransformCreateTableAs(PEGTransformer &tran
 	// child 1: PartitionSortedOptions?
 	// child 2: WithList?
 	// child 3: 'AS'
-	// child 4: SelectStatementInternal
+	// child 4: Statement
 	// child 5: WithData?
 	auto &list_pr = parse_result->Cast<ListParseResult>();
 	CreateTableAs result;
@@ -108,7 +109,11 @@ CreateTableAs PEGTransformerFactory::TransformCreateTableAs(PEGTransformer &tran
 	result.partition_keys = std::move(pso.partition_keys);
 	result.sort_keys = std::move(pso.sort_keys);
 	transformer.TransformOptional<case_insensitive_map_t<unique_ptr<ParsedExpression>>>(list_pr, 2, result.options);
-	result.select_statement = transformer.Transform<unique_ptr<SelectStatement>>(list_pr.Child<ListParseResult>(4));
+	auto stmt = transformer.Transform<unique_ptr<SQLStatement>>(list_pr.Child<ListParseResult>(4));
+	if (stmt->type != StatementType::SELECT_STATEMENT) {
+		throw ParserException("CREATE TABLE AS requires a SELECT clause");
+	}
+	result.select_statement = unique_ptr_cast<SQLStatement, SelectStatement>(std::move(stmt));
 	transformer.TransformOptional<bool>(list_pr, 5, result.with_data);
 	if (result.with_data) {
 		auto limit_modifier = make_uniq<LimitModifier>();
@@ -132,13 +137,17 @@ ColumnList PEGTransformerFactory::TransformIdentifierList(PEGTransformer &transf
 
 ColumnElements PEGTransformerFactory::TransformCreateColumnList(PEGTransformer &transformer,
                                                                 optional_ptr<ParseResult> parse_result) {
-	// CreateColumnList <- Parens(CreateTableColumnList) PartitionSortedOptions? WithList?
-	// child 0: Parens(CreateTableColumnList)
+	// CreateColumnList <- Parens(CreateTableColumnList?) PartitionSortedOptions? WithList?
+	// child 0: Parens(CreateTableColumnList?)
 	// child 1: PartitionSortedOptions?
 	// child 2: WithList?
 	auto &list_pr = parse_result->Cast<ListParseResult>();
-	auto create_table_column_list = ExtractResultFromParens(list_pr.Child<ListParseResult>(0));
-	auto result = transformer.Transform<ColumnElements>(create_table_column_list);
+	auto create_table_column_list =
+	    ExtractResultFromParens(list_pr.Child<ListParseResult>(0))->Cast<OptionalParseResult>();
+	if (!create_table_column_list.HasResult()) {
+		throw ParserException("Table must have at least one column!");
+	}
+	auto result = transformer.Transform<ColumnElements>(create_table_column_list.optional_result);
 	PartitionSortedOptions pso;
 	transformer.TransformOptional<PartitionSortedOptions>(list_pr, 1, pso);
 	result.partition_keys = std::move(pso.partition_keys);
@@ -238,7 +247,7 @@ vector<string> PEGTransformerFactory::TransformDottedIdentifier(PEGTransformer &
 		auto repeat_elements = optional_elements.optional_result->Cast<RepeatParseResult>();
 		for (auto &child_ref : repeat_elements.children) {
 			auto &sub_list = child_ref->Cast<ListParseResult>();
-			parts.push_back(sub_list.Child<IdentifierParseResult>(1).identifier);
+			parts.push_back(transformer.Transform<string>(sub_list.GetChild(1)));
 		}
 	}
 	return parts;
@@ -287,7 +296,25 @@ ConstraintColumnDefinition PEGTransformerFactory::TransformColumnDefinition(PEGT
 				fk_constraint->fk_columns.push_back(qualified_name.name);
 				column_constraint.constraints.push_back(std::move(fk_constraint));
 			} else if (constraint->name == "ColumnCollation") {
-				type = transformer.Transform<LogicalType>(constraint);
+				if (type.id() == LogicalTypeId::ANY) {
+					throw ParserException("Specify the VARCHAR type for column \"%s\" with collation.",
+					                      qualified_name.ToString());
+				} else if (type.IsUnbound()) {
+					auto &expr = UnboundType::GetTypeExpression(type);
+					if (expr->GetExpressionClass() != ExpressionClass::TYPE) {
+						throw InternalException("Expected a type expression");
+					}
+					auto &type_expr = expr->Cast<TypeExpression>();
+					if (!StringUtil::CIEquals(type_expr.GetTypeName(), "VARCHAR")) {
+						throw ParserException("Only VARCHAR columns can have collations!");
+					}
+				} else {
+					throw InternalException("Expected only unbound types here");
+				}
+				auto collation = transformer.Transform<unique_ptr<ParsedExpression>>(constraint);
+				vector<unique_ptr<ParsedExpression>> type_children;
+				type_children.push_back(std::move(collation));
+				type = LogicalType::UNBOUND(make_uniq<TypeExpression>("VARCHAR", std::move(type_children)));
 			} else {
 				column_constraint.constraints.push_back(transformer.Transform<unique_ptr<Constraint>>(constraint));
 			}
@@ -375,8 +402,7 @@ unique_ptr<Constraint> PEGTransformerFactory::TransformTopUniqueConstraint(PEGTr
                                                                            optional_ptr<ParseResult> parse_result) {
 	auto &list_pr = parse_result->Cast<ListParseResult>();
 	auto column_list = transformer.Transform<vector<string>>(list_pr.Child<ListParseResult>(1));
-	auto result = make_uniq<UniqueConstraint>(column_list, false);
-	return std::move(result);
+	return make_uniq<UniqueConstraint>(column_list, false);
 }
 
 unique_ptr<Constraint> PEGTransformerFactory::TransformCheckConstraint(PEGTransformer &transformer,
@@ -384,6 +410,9 @@ unique_ptr<Constraint> PEGTransformerFactory::TransformCheckConstraint(PEGTransf
 	auto &list_pr = parse_result->Cast<ListParseResult>();
 	auto extract_parens = ExtractResultFromParens(list_pr.Child<ListParseResult>(1));
 	auto check_expr = transformer.Transform<unique_ptr<ParsedExpression>>(extract_parens);
+	if (check_expr->HasSubquery()) {
+		throw ParserException("subqueries prohibited in CHECK constraints");
+	}
 	auto result = make_uniq<CheckConstraint>(std::move(check_expr));
 	return std::move(result);
 }
@@ -395,6 +424,9 @@ unique_ptr<Constraint> PEGTransformerFactory::TransformTopForeignKeyConstraint(P
 
 	auto fk_constraint = transformer.Transform<unique_ptr<ForeignKeyConstraint>>(list_pr.Child<ListParseResult>(3));
 	fk_constraint->fk_columns = pk_list;
+	if (!fk_constraint->pk_columns.empty() && fk_constraint->fk_columns.size() != fk_constraint->pk_columns.size()) {
+		throw ParserException("The number of referencing and referenced columns for foreign keys must be the same");
+	}
 	return std::move(fk_constraint);
 }
 
@@ -519,12 +551,14 @@ pair<bool, ConstraintType> PEGTransformerFactory::TransformNotNullConstraint(PEG
 	return make_pair(false, ConstraintType::INVALID);
 }
 
-LogicalType PEGTransformerFactory::TransformColumnCollation(PEGTransformer &transformer,
-                                                            optional_ptr<ParseResult> parse_result) {
+unique_ptr<ParsedExpression> PEGTransformerFactory::TransformColumnCollation(PEGTransformer &transformer,
+                                                                             optional_ptr<ParseResult> parse_result) {
 	auto &list_pr = parse_result->Cast<ListParseResult>();
 	auto dotted_identifier = transformer.Transform<vector<string>>(list_pr.Child<ListParseResult>(1));
 	string collation = StringUtil::Join(dotted_identifier, ".");
-	return LogicalType::VARCHAR_COLLATION(collation);
+	auto expr = make_uniq<ConstantExpression>(Value(collation));
+	expr->alias = "collation";
+	return std::move(expr);
 }
 
 bool PEGTransformerFactory::TransformWithData(PEGTransformer &transformer, optional_ptr<ParseResult> parse_result) {
