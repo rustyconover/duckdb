@@ -2861,6 +2861,9 @@ static const TransformFrameOps ROLLBACK_TRANSACTION_OPS = {
 static const TransformFrameOps COMMIT_TRANSACTION_OPS = {"CommitTransaction",
                                                          &PEGTransformerFactory::InitializeCommitTransactionTrampoline,
                                                          &PEGTransformerFactory::FinalizeCommitTransactionTrampoline};
+static const TransformFrameOps JOIN_TRANSACTION_OPS = {"JoinTransaction",
+                                                       &PEGTransformerFactory::InitializeJoinTransactionTrampoline,
+                                                       &PEGTransformerFactory::FinalizeJoinTransactionTrampoline};
 static const TransformFrameOps READ_OR_WRITE_OPS = {"ReadOrWrite",
                                                     &PEGTransformerFactory::InitializeReadOrWriteTrampoline,
                                                     &PEGTransformerFactory::FinalizeReadOrWriteTrampoline};
@@ -3950,6 +3953,7 @@ const case_insensitive_map_t<const TransformFrameOps *> &PEGTransformerFactory::
 	    {"BeginTransaction", &BEGIN_TRANSACTION_OPS},
 	    {"RollbackTransaction", &ROLLBACK_TRANSACTION_OPS},
 	    {"CommitTransaction", &COMMIT_TRANSACTION_OPS},
+	    {"JoinTransaction", &JOIN_TRANSACTION_OPS},
 	    {"ReadOrWrite", &READ_OR_WRITE_OPS},
 	    {"ReadOnlyOrReadWrite", &READ_ONLY_OR_READ_WRITE_OPS},
 	    {"ReadOnly", &READ_ONLY_OPS},
@@ -24771,6 +24775,20 @@ PEGTransformerFactory::FinalizeCommitTransactionTrampoline(PEGTransformer &trans
 	auto &has_result_opt = list_pr.GetChild(1).Cast<OptionalParseResult>();
 	has_result = has_result_opt.HasResult();
 	auto result = TransformCommitTransaction(transformer, has_result);
+	return make_uniq<TypedTransformResult<unique_ptr<SQLStatement>>>(std::move(result));
+}
+
+void PEGTransformerFactory::InitializeJoinTransactionTrampoline(PEGTransformer &transformer, TransformStack &stack,
+                                                                TransformStackFrame &frame) {
+	frame.ReserveChildSlots(0);
+}
+
+unique_ptr<TransformResultValue> PEGTransformerFactory::FinalizeJoinTransactionTrampoline(PEGTransformer &transformer,
+                                                                                          TransformStack &stack,
+                                                                                          TransformStackFrame &frame) {
+	auto &list_pr = frame.parse_result.Cast<ListParseResult>();
+	auto string_literal = TransformStringLiteral(transformer, list_pr.GetChild(2));
+	auto result = TransformJoinTransaction(transformer, string_literal);
 	return make_uniq<TypedTransformResult<unique_ptr<SQLStatement>>>(std::move(result));
 }
 

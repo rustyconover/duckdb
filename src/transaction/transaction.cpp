@@ -24,4 +24,20 @@ void Transaction::SetReadWrite() {
 void Transaction::SetModifications(DatabaseModificationType type) {
 }
 
+ErrorData Transaction::Finalize(shared_ptr<Transaction> &self, ClientContext &context, bool rollback) {
+	D_ASSERT(self.get() == this);
+	ErrorData error;
+	try {
+		if (rollback) {
+			manager.RollbackTransaction(*this);
+		} else {
+			error = manager.CommitTransaction(context, *this);
+		}
+	} catch (std::exception &ex) {
+		error.Merge(ErrorData(ex));
+	}
+	self.reset();
+	return error;
+}
+
 } // namespace duckdb

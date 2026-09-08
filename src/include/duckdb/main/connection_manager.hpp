@@ -32,6 +32,7 @@ public:
 	idx_t GetConnectionCount() const;
 
 	void AssignConnectionId(Connection &connection);
+	shared_ptr<ClientContext> FindByConnectionId(connection_t connection_id);
 
 	static ConnectionManager &Get(DatabaseInstance &db);
 	static ConnectionManager &Get(ClientContext &context);

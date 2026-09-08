@@ -43,6 +43,13 @@
         "struct": "CurrentTransactionId"
     },
     {
+        "name": "duckdb_share_transaction",
+        "description": "Return an id that another in-process connection can use with JOIN TRANSACTION.",
+        "example": "duckdb_share_transaction()",
+        "type": "scalar_function",
+        "struct": "ShareTransactionFun"
+    },
+    {
         "name": "current_query_id",
         "description": "Get the current query_id",
         "example": "current_query_id()",

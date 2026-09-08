@@ -5,10 +5,28 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/transaction/transaction_manager.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/transaction/duck_transaction_manager.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/main/secret/secret_storage.hpp"
 
 namespace duckdb {
+
+namespace {
+
+shared_ptr<Transaction> WrapNonOwning(Transaction &transaction) {
+	return shared_ptr<Transaction>(&transaction, [](Transaction *) {});
+}
+
+shared_ptr<Transaction> StartTransaction(AttachedDatabase &db, ClientContext &context) {
+	auto &manager = db.GetTransactionManager();
+	if (manager.IsDuckTransactionManager()) {
+		return manager.Cast<DuckTransactionManager>().StartTransactionShared(context);
+	}
+	return WrapNonOwning(manager.StartTransaction(context));
+}
+
+} // namespace
 
 MetaTransaction::MetaTransaction(ClientContext &context_p, timestamp_t start_timestamp_p,
                                  transaction_t transaction_id_p)
@@ -52,9 +70,8 @@ optional_ptr<Transaction> MetaTransaction::TryGetTransaction(AttachedDatabase &d
 	auto entry = transactions.find(db);
 	if (entry == transactions.end()) {
 		return nullptr;
-	} else {
-		return &entry->second.transaction;
 	}
+	return entry->second.transaction.get();
 }
 
 Transaction &MetaTransaction::GetTransaction(AttachedDatabase &db) {
@@ -64,8 +81,8 @@ Transaction &MetaTransaction::GetTransaction(AttachedDatabase &db) {
 	lock_guard<mutex> guard(lock);
 	auto entry = transactions.find(db);
 	if (entry == transactions.end()) {
-		auto &new_transaction = db.GetTransactionManager().StartTransaction(context);
-		new_transaction.active_query = active_query.load();
+		auto new_transaction = StartTransaction(db, context);
+		new_transaction->active_query = active_query.load();
 #ifdef DEBUG
 		VerifyAllTransactionsUnique(db, all_transactions);
 #endif
@@ -73,16 +90,17 @@ Transaction &MetaTransaction::GetTransaction(AttachedDatabase &db) {
 		// reserve first, then insert, so that a failing allocation happens before either is modified and the
 		// push_back that follows cannot allocate.
 		all_transactions.reserve(all_transactions.size() + 1);
-		transactions.insert(make_pair(reference<AttachedDatabase>(db), TransactionReference(new_transaction)));
+		auto &result = *new_transaction;
+		transactions.insert({reference<AttachedDatabase>(db), TransactionReference(std::move(new_transaction))});
 		all_transactions.push_back(db);
 		auto shared_db = db.shared_from_this();
 		UseDatabase(shared_db);
 
-		return new_transaction;
-	} else {
-		D_ASSERT(entry->second.transaction.active_query == active_query);
-		return entry->second.transaction;
+		return result;
 	}
+	auto &transaction = entry->second.transaction;
+	D_ASSERT(transaction.use_count() > 2 || transaction->active_query == active_query);
+	return *transaction;
 }
 
 void MetaTransaction::RemoveTransaction(AttachedDatabase &db) {
@@ -116,18 +134,83 @@ Transaction &Transaction::Get(ClientContext &context, Catalog &catalog) {
 	return Transaction::Get(context, catalog.GetAttached());
 }
 
-ErrorData MetaTransaction::Commit() {
+void MetaTransaction::Adopt(AttachedDatabase &db, shared_ptr<Transaction> transaction) {
+	D_ASSERT(transaction);
+	lock_guard<mutex> guard(lock);
+	if (transactions.find(db) != transactions.end()) {
+		throw TransactionException("Cannot join transaction for database '%s': this connection already has a "
+		                           "transaction open against that database",
+		                           db.GetName());
+	}
+#ifdef DEBUG
+	VerifyAllTransactionsUnique(db, all_transactions);
+#endif
+	auto shared_db = db.shared_from_this();
+	UseDatabase(shared_db);
+	all_transactions.reserve(all_transactions.size() + 1);
+	transactions.insert({reference<AttachedDatabase>(db), TransactionReference(std::move(transaction))});
+	all_transactions.push_back(db);
+}
+
+ForeignTransactionHandle MetaTransaction::GetSharedDuckTransaction(const Identifier &db_name) {
+	lock_guard<mutex> guard(lock);
+	for (auto &db_ref : all_transactions) {
+		auto &db = db_ref.get();
+		if (db.GetName() != db_name) {
+			continue;
+		}
+		auto entry = transactions.find(db);
+		if (entry == transactions.end() || !entry->second.transaction ||
+		    !entry->second.transaction->IsDuckTransaction()) {
+			return {};
+		}
+		ForeignTransactionHandle result;
+		result.database = db.shared_from_this();
+		result.transaction = shared_ptr_cast<Transaction, DuckTransaction>(entry->second.transaction);
+		return result;
+	}
+	return {};
+}
+
+bool MetaTransaction::IsParticipatingInSharedTransaction() {
+	lock_guard<mutex> guard(lock);
+	for (auto &entry : transactions) {
+		auto &transaction = entry.second.transaction;
+		if (!transaction || !transaction->IsDuckTransaction()) {
+			continue;
+		}
+		if (transaction.use_count() > 2 || transaction->Cast<DuckTransaction>().RollbackRequested()) {
+			return true;
+		}
+	}
+	return false;
+}
+
+ErrorData MetaTransaction::FinalizeAll(bool rollback) {
 	ErrorData error;
+	vector<reference<AttachedDatabase>> databases;
+	vector<shared_ptr<Transaction>> transaction_handles;
+	{
+		lock_guard<mutex> guard(lock);
+		for (idx_t i = all_transactions.size(); i > 0; i--) {
+			auto &db = all_transactions[i - 1].get();
+			auto entry = transactions.find(db);
+			if (entry == transactions.end()) {
+				throw InternalException("Could not find transaction corresponding to database in MetaTransaction");
+			}
+			if (entry->second.state != TransactionState::UNCOMMITTED) {
+				continue;
+			}
+			databases.emplace_back(db);
+			transaction_handles.push_back(std::move(entry->second.transaction));
+		}
+	}
 #ifdef DEBUG
 	reference_set_t<AttachedDatabase> committed_tx;
 #endif
-	// commit transactions in reverse order
-	for (idx_t i = all_transactions.size(); i > 0; i--) {
-		auto &db = all_transactions[i - 1].get();
-		auto entry = transactions.find(db);
-		if (entry == transactions.end()) {
-			throw InternalException("Could not find transaction corresponding to database in MetaTransaction");
-		}
+	for (idx_t i = 0; i < databases.size(); i++) {
+		auto &db = databases[i].get();
+		auto transaction = std::move(transaction_handles[i]);
 
 #ifdef DEBUG
 		auto already_committed = committed_tx.insert(db).second == false;
@@ -136,58 +219,31 @@ ErrorData MetaTransaction::Commit() {
 		}
 #endif
 
-		auto &transaction_manager = db.GetTransactionManager();
-		auto &transaction_ref = entry->second;
-		if (ValidChecker::IsInvalidated(db)) {
+		bool invalidated = ValidChecker::IsInvalidated(db);
+		if (invalidated) {
 			error.Merge(ErrorData(IOException("%s", ValidChecker::InvalidatedMessage(db))));
-			continue;
 		}
-		if (transaction_ref.state != TransactionState::UNCOMMITTED) {
-			continue;
+		auto vote_rollback = rollback || invalidated || error.HasError();
+		auto finalize_error = transaction->Finalize(transaction, context, vote_rollback);
+		if (finalize_error.HasError()) {
+			error.Merge(finalize_error);
 		}
-		auto &transaction = transaction_ref.transaction;
-		try {
-			if (!error.HasError()) {
-				// Commit the transaction.
-				error = transaction_manager.CommitTransaction(context, transaction);
-				transaction_ref.state = error.HasError() ? TransactionState::ROLLED_BACK : TransactionState::COMMITTED;
-			} else {
-				// Rollback due to previous error.
-				transaction_manager.RollbackTransaction(transaction);
-				transaction_ref.state = TransactionState::ROLLED_BACK;
-			}
-		} catch (std::exception &ex) {
-			error.Merge(ErrorData(ex));
-			transaction_ref.state = TransactionState::ROLLED_BACK;
+		lock_guard<mutex> guard(lock);
+		auto entry = transactions.find(db);
+		if (entry != transactions.end()) {
+			entry->second.state = (vote_rollback || finalize_error.HasError()) ? TransactionState::ROLLED_BACK
+			                                                                   : TransactionState::COMMITTED;
 		}
 	}
 	return error;
 }
 
+ErrorData MetaTransaction::Commit() {
+	return FinalizeAll(false);
+}
+
 void MetaTransaction::Rollback() {
-	// Rollback all transactions in reverse order.
-	ErrorData error;
-	for (idx_t i = all_transactions.size(); i > 0; i--) {
-		auto &db = all_transactions[i - 1].get();
-		auto &transaction_manager = db.GetTransactionManager();
-		auto entry = transactions.find(db);
-		D_ASSERT(entry != transactions.end());
-		auto &transaction_ref = entry->second;
-		if (ValidChecker::IsInvalidated(db)) {
-			error.Merge(ErrorData(IOException("%s", ValidChecker::InvalidatedMessage(db))));
-			continue;
-		}
-		if (transaction_ref.state != TransactionState::UNCOMMITTED) {
-			continue;
-		}
-		try {
-			auto &transaction = transaction_ref.transaction;
-			transaction_manager.RollbackTransaction(transaction);
-		} catch (std::exception &ex) {
-			error.Merge(ErrorData(ex));
-		}
-		transaction_ref.state = TransactionState::ROLLED_BACK;
-	}
+	auto error = FinalizeAll(true);
 	if (error.HasError()) {
 		error.Throw();
 	}
@@ -210,7 +266,14 @@ void MetaTransaction::SetActiveQuery(transaction_t query_number) {
 	lock_guard<mutex> guard(lock);
 	active_query = query_number;
 	for (auto &entry : transactions) {
-		entry.second.transaction.active_query = query_number;
+		auto &transaction = entry.second.transaction;
+		if (!transaction) {
+			continue;
+		}
+		if (transaction->IsDuckTransaction() && transaction.use_count() > 2) {
+			continue;
+		}
+		transaction->active_query = query_number;
 	}
 }
 

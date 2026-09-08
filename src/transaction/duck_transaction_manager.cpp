@@ -74,6 +74,10 @@ DuckTransactionManager &DuckTransactionManager::Get(AttachedDatabase &db) {
 }
 
 Transaction &DuckTransactionManager::StartTransaction(ClientContext &context) {
+	return *StartTransactionShared(context);
+}
+
+shared_ptr<DuckTransaction> DuckTransactionManager::StartTransactionShared(ClientContext &context) {
 	// obtain the transaction lock during this function
 	auto &meta_transaction = MetaTransaction::Get(context);
 	unique_lock<mutex> start_lock(start_transaction_lock, std::defer_lock);
@@ -96,12 +100,11 @@ Transaction &DuckTransactionManager::StartTransaction(ClientContext &context) {
 	}
 
 	// create the actual transaction
-	auto transaction = make_uniq<DuckTransaction>(*this, context, start_time, view, last_committed_version);
-	auto &transaction_ref = *transaction;
+	auto transaction = make_shared_ptr<DuckTransaction>(*this, context, start_time, view, last_committed_version);
 
 	// store it in the set of active transactions
-	active_transactions.push_back(std::move(transaction));
-	return transaction_ref;
+	active_transactions.push_back(transaction);
+	return transaction;
 }
 
 void DuckTransactionManager::SetActiveCheckpoint(idx_t checkpoint_id) {

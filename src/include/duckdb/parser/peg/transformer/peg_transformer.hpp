@@ -4744,6 +4744,10 @@ public:
 	                                                  TransformStackFrame &frame);
 	static unique_ptr<TransformResultValue>
 	FinalizeCommitTransactionTrampoline(PEGTransformer &transformer, TransformStack &stack, TransformStackFrame &frame);
+	static void InitializeJoinTransactionTrampoline(PEGTransformer &transformer, TransformStack &stack,
+	                                                TransformStackFrame &frame);
+	static unique_ptr<TransformResultValue>
+	FinalizeJoinTransactionTrampoline(PEGTransformer &transformer, TransformStack &stack, TransformStackFrame &frame);
 	static void InitializeReadOrWriteTrampoline(PEGTransformer &transformer, TransformStack &stack,
 	                                            TransformStackFrame &frame);
 	static unique_ptr<TransformResultValue>
@@ -8536,6 +8540,9 @@ public:
 	static unique_ptr<TransformResultValue> TransformCommitTransactionInternal(PEGTransformer &transformer,
 	                                                                           ParseResult &parse_result);
 	static unique_ptr<SQLStatement> TransformCommitTransaction(PEGTransformer &transformer, const bool &has_result);
+	static unique_ptr<TransformResultValue> TransformJoinTransactionInternal(PEGTransformer &transformer,
+	                                                                         ParseResult &parse_result);
+	static unique_ptr<SQLStatement> TransformJoinTransaction(PEGTransformer &transformer, const string &string_literal);
 	static unique_ptr<TransformResultValue> TransformReadOrWriteInternal(PEGTransformer &transformer,
 	                                                                     ParseResult &parse_result);
 	static TransactionModifierType TransformReadOrWrite(PEGTransformer &transformer,

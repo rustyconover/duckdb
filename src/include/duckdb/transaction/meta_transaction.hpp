@@ -24,16 +24,22 @@ class SecretManager;
 class SecretStorage;
 struct DatabaseModificationType;
 class Transaction;
+class DuckTransaction;
 
 enum class TransactionState { UNCOMMITTED, COMMITTED, ROLLED_BACK };
 
 struct TransactionReference {
-	explicit TransactionReference(Transaction &transaction_p)
-	    : state(TransactionState::UNCOMMITTED), transaction(transaction_p) {
+	TransactionReference() = default;
+	explicit TransactionReference(shared_ptr<Transaction> transaction_p) : transaction(std::move(transaction_p)) {
 	}
 
-	TransactionState state;
-	Transaction &transaction;
+	TransactionState state {TransactionState::UNCOMMITTED};
+	shared_ptr<Transaction> transaction;
+};
+
+struct ForeignTransactionHandle {
+	shared_ptr<AttachedDatabase> database;
+	shared_ptr<DuckTransaction> transaction;
 };
 
 //! The MetaTransaction manages multiple transactions for different attached databases
@@ -62,12 +68,25 @@ public:
 	Transaction &GetTransaction(AttachedDatabase &db);
 	optional_ptr<Transaction> TryGetTransaction(AttachedDatabase &db);
 	void RemoveTransaction(AttachedDatabase &db);
+	ForeignTransactionHandle GetSharedDuckTransaction(const Identifier &db_name);
+	void Adopt(AttachedDatabase &db, shared_ptr<Transaction> transaction);
+	bool IsParticipatingInSharedTransaction();
+	const string &GetSharedTransactionId() const {
+		return shared_transaction_id;
+	}
+	void SetSharedTransactionId(string id) {
+		shared_transaction_id = std::move(id);
+	}
 
 	ErrorData Commit();
 	void Rollback();
 	// Finalize the transaction after a COMMIT of ROLLBACK.
 	void Finalize();
 
+private:
+	ErrorData FinalizeAll(bool rollback);
+
+public:
 	idx_t GetActiveQuery();
 	void SetActiveQuery(transaction_t query_number);
 
@@ -106,6 +125,8 @@ private:
 	identifier_map_t<reference<AttachedDatabase>> used_databases;
 	//! Secrets that only live for the duration of this transaction.
 	unique_ptr<SecretStorage> transaction_secret_storage;
+	//! Stable id returned by duckdb_share_transaction() for this transaction.
+	string shared_transaction_id;
 };
 
 } // namespace duckdb

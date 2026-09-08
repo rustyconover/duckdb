@@ -64,6 +64,10 @@ SourceResultType PhysicalTransaction::GetDataInternal(ExecutionContext &context,
 		}
 		break;
 	}
+	case TransactionType::JOIN_TRANSACTION: {
+		client.transaction.JoinTransaction(info->transaction_id);
+		break;
+	}
 	case TransactionType::ROLLBACK: {
 		if (client.transaction.IsAutoCommit()) {
 			throw TransactionException("cannot rollback - no transaction is active");

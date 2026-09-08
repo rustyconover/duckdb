@@ -23,7 +23,7 @@ struct UndoBufferProperties;
 struct DuckCleanupInfo {
 	//! All transactions in a cleanup info share the same lowest_visibility_bound.
 	VisibilityBound lowest_visibility_bound;
-	vector<unique_ptr<DuckTransaction>> transactions;
+	vector<shared_ptr<DuckTransaction>> transactions;
 
 	void Cleanup();
 	bool ScheduleCleanup() noexcept;
@@ -41,6 +41,8 @@ public:
 
 	//! Start a new transaction
 	Transaction &StartTransaction(ClientContext &context) override;
+	//! Start a transaction and return an owning participation handle.
+	shared_ptr<DuckTransaction> StartTransactionShared(ClientContext &context);
 	//! Commit the given transaction
 	ErrorData CommitTransaction(ClientContext &context, Transaction &transaction) override;
 	//! Rollback the given transaction
@@ -141,9 +143,9 @@ private:
 	//! Source of checkpoint identities
 	atomic<idx_t> next_checkpoint_id = {0};
 	//! Set of currently running transactions
-	vector<unique_ptr<DuckTransaction>> active_transactions;
+	vector<shared_ptr<DuckTransaction>> active_transactions;
 	//! Set of recently committed transactions
-	vector<unique_ptr<DuckTransaction>> recently_committed_transactions;
+	vector<shared_ptr<DuckTransaction>> recently_committed_transactions;
 	//! The lock used for transaction operations
 	mutex transaction_lock;
 	//! The checkpoint lock

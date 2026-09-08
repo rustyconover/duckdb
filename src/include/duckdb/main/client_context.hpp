@@ -361,8 +361,15 @@ public:
 	~ClientContextLock() {
 	}
 
+	void Unlock() {
+		client_guard.unlock();
+	}
+	void Lock() {
+		client_guard.lock();
+	}
+
 private:
-	lock_guard<mutex> client_guard;
+	unique_lock<mutex> client_guard;
 };
 
 } // namespace duckdb

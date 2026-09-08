@@ -60,6 +60,7 @@
 #include "duckdb/transaction/meta_transaction.hpp"
 #include "duckdb/transaction/transaction_context.hpp"
 #include "duckdb/transaction/transaction_manager.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/logging/log_type.hpp"
 #include "duckdb/logging/log_manager.hpp"
 #include "duckdb/main/settings.hpp"
@@ -95,6 +96,17 @@ public:
 	unique_ptr<Executor> executor;
 	//! The progress bar
 	unique_ptr<ProgressBar> progress_bar;
+	//! Pins and holds a DuckTransaction's statement mutex for this query.
+	struct StatementGuard {
+		explicit StatementGuard(shared_ptr<mutex> lock_p) : lock(std::move(lock_p)), guard(*lock) {
+		}
+		StatementGuard(StatementGuard &&) = default;
+		StatementGuard &operator=(StatementGuard &&) = default;
+
+		shared_ptr<mutex> lock;
+		unique_lock<mutex> guard;
+	};
+	vector<StatementGuard> statement_guards;
 
 public:
 	void SetOpenResult(BaseQueryResult &result) {
@@ -306,6 +318,41 @@ void ClientContext::BeginQueryInternal(ClientContextLock &lock, const SQLStateme
 	active_query = make_uniq<ActiveQueryContext>();
 	if (transaction.IsAutoCommit()) {
 		transaction.BeginTransaction();
+	}
+
+	// Lock every already-open DuckTransaction in a stable order for the query duration.
+	auto &meta_transaction = transaction.ActiveTransaction();
+	vector<shared_ptr<mutex>> statement_locks;
+	for (auto &database : meta_transaction.OpenedTransactions()) {
+		auto open_transaction = meta_transaction.TryGetTransaction(database.get());
+		if (open_transaction && open_transaction->IsDuckTransaction()) {
+			statement_locks.push_back(open_transaction->Cast<DuckTransaction>().GetStatementLock());
+		}
+	}
+	if (!statement_locks.empty()) {
+		std::sort(statement_locks.begin(), statement_locks.end(),
+		          [](const shared_ptr<mutex> &left, const shared_ptr<mutex> &right) {
+			          return std::less<const void *>()(left.get(), right.get());
+		          });
+		vector<ActiveQueryContext::StatementGuard> statement_guards;
+		statement_guards.reserve(statement_locks.size());
+		{
+			struct ContextRelockGuard {
+				explicit ContextRelockGuard(ClientContextLock &lock_p) : lock(lock_p) {
+					lock.Unlock();
+				}
+				~ContextRelockGuard() {
+					lock.Lock();
+				}
+
+				ClientContextLock &lock;
+			};
+			ContextRelockGuard context_relock(lock);
+			for (auto &statement_lock : statement_locks) {
+				statement_guards.emplace_back(std::move(statement_lock));
+			}
+		}
+		active_query->statement_guards = std::move(statement_guards);
 	}
 
 	transaction.SetActiveQuery(db->GetDatabaseManager().GetNewQueryNumber());

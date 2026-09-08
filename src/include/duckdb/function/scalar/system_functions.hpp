@@ -75,6 +75,16 @@ struct CurrentTransactionId {
 	static ScalarFunction GetFunction();
 };
 
+struct ShareTransactionFun {
+	static constexpr const char *Name = "duckdb_share_transaction";
+	static constexpr const char *Parameters = "";
+	static constexpr const char *Description = "Return an id that another in-process connection can use with JOIN TRANSACTION.";
+	static constexpr const char *Example = "duckdb_share_transaction()";
+	static constexpr const char *Categories = "";
+
+	static ScalarFunction GetFunction();
+};
+
 struct CurrentQueryId {
 	static constexpr const char *Name = "current_query_id";
 	static constexpr const char *Parameters = "";

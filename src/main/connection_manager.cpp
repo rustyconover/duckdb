@@ -35,6 +35,17 @@ void ConnectionManager::AssignConnectionId(Connection &connection) {
 	connection.context->connection_id = current_connection_id.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
+shared_ptr<ClientContext> ConnectionManager::FindByConnectionId(connection_t connection_id) {
+	lock_guard<mutex> lock(connections_lock);
+	for (auto &entry : connections) {
+		auto context = entry.second.lock();
+		if (context && context->GetConnectionId() == connection_id) {
+			return context;
+		}
+	}
+	return nullptr;
+}
+
 vector<shared_ptr<ClientContext>> ConnectionManager::GetConnectionList() {
 	lock_guard<mutex> lock(connections_lock);
 	vector<shared_ptr<ClientContext>> result;

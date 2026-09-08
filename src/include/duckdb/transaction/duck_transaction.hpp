@@ -107,6 +107,14 @@ public:
 		is_checkpoint_transaction = true;
 	}
 
+	bool RollbackRequested() const {
+		return rollback_requested.load();
+	}
+	ErrorData Finalize(shared_ptr<Transaction> &self, ClientContext &context, bool rollback) override;
+	shared_ptr<mutex> GetStatementLock() const {
+		return statement_lock;
+	}
+
 private:
 	//! The undo buffer is used to store old versions of rows that are updated
 	//! or deleted
@@ -131,6 +139,11 @@ private:
 	reference_map_t<DataTableInfo, unique_ptr<ActiveTableLock>> active_locks;
 	//! Flag to prevent auto-checkpointing inside a checkpoint transaction.
 	bool is_checkpoint_transaction = false;
+	//! Any rollback vote dooms the shared transaction.
+	atomic<bool> rollback_requested {false};
+	//! Shared so finalizers and statement guards can safely outlive the transaction object.
+	shared_ptr<mutex> finalize_lock;
+	shared_ptr<mutex> statement_lock;
 };
 
 } // namespace duckdb

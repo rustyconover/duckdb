@@ -10651,6 +10651,14 @@ unique_ptr<TransformResultValue> PEGTransformerFactory::TransformCommitTransacti
 	return make_uniq<TypedTransformResult<unique_ptr<SQLStatement>>>(std::move(result));
 }
 
+unique_ptr<TransformResultValue> PEGTransformerFactory::TransformJoinTransactionInternal(PEGTransformer &transformer,
+                                                                                         ParseResult &parse_result) {
+	auto &list_pr = parse_result.Cast<ListParseResult>();
+	auto string_literal = transformer.Transform<string>(list_pr.GetChild(2));
+	auto result = TransformJoinTransaction(transformer, string_literal);
+	return make_uniq<TypedTransformResult<unique_ptr<SQLStatement>>>(std::move(result));
+}
+
 unique_ptr<TransformResultValue> PEGTransformerFactory::TransformReadOrWriteInternal(PEGTransformer &transformer,
                                                                                      ParseResult &parse_result) {
 	auto &list_pr = parse_result.Cast<ListParseResult>();
@@ -12004,6 +12012,7 @@ void PEGTransformerFactory::RegisterGenerated() {
 	    {"BeginTransaction", &PEGTransformerFactory::TransformBeginTransactionInternal},
 	    {"RollbackTransaction", &PEGTransformerFactory::TransformRollbackTransactionInternal},
 	    {"CommitTransaction", &PEGTransformerFactory::TransformCommitTransactionInternal},
+	    {"JoinTransaction", &PEGTransformerFactory::TransformJoinTransactionInternal},
 	    {"ReadOrWrite", &PEGTransformerFactory::TransformReadOrWriteInternal},
 	    {"ReadOnlyOrReadWrite", &PEGTransformerFactory::TransformReadOnlyOrReadWriteInternal},
 	    {"ReadOnly", &PEGTransformerFactory::TransformReadOnlyInternal},

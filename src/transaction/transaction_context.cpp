@@ -10,6 +10,9 @@
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/main/database_manager.hpp"
+#include "duckdb/main/connection_manager.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/common/operator/cast_operators.hpp"
 
 namespace duckdb {
 
@@ -39,7 +42,10 @@ void TransactionContext::BeginTransaction() {
 	}
 	auto start_timestamp = Timestamp::GetCurrentTimestamp();
 	auto global_transaction_id = context.db->GetDatabaseManager().GetNewTransactionNumber();
-	current_transaction = make_uniq<MetaTransaction>(context, start_timestamp, global_transaction_id);
+	{
+		lock_guard<mutex> guard(transaction_lock);
+		current_transaction = make_uniq<MetaTransaction>(context, start_timestamp, global_transaction_id);
+	}
 
 	// Notify any registered state of transaction begin
 	for (auto &state : context.registered_state->States()) {
@@ -64,7 +70,11 @@ void TransactionContext::Commit() {
 		throw TransactionException("failed to commit: no transaction active");
 	}
 	autocheckpoint_error = ErrorData();
-	auto transaction = std::move(current_transaction);
+	unique_ptr<MetaTransaction> transaction;
+	{
+		lock_guard<mutex> guard(transaction_lock);
+		transaction = std::move(current_transaction);
+	}
 	ClearTransaction();
 	auto error = transaction->Commit();
 	// Notify any registered state of transaction commit
@@ -104,7 +114,11 @@ void TransactionContext::Rollback(optional_ptr<ErrorData> error) {
 	if (!current_transaction) {
 		throw TransactionException("failed to rollback: no transaction active");
 	}
-	auto transaction = std::move(current_transaction);
+	unique_ptr<MetaTransaction> transaction;
+	{
+		lock_guard<mutex> guard(transaction_lock);
+		transaction = std::move(current_transaction);
+	}
 	ClearTransaction();
 	context.client_data->profiler->Reset();
 
@@ -126,7 +140,73 @@ void TransactionContext::Rollback(optional_ptr<ErrorData> error) {
 
 void TransactionContext::ClearTransaction() {
 	SetAutoCommit(true);
+	lock_guard<mutex> guard(transaction_lock);
 	current_transaction = nullptr;
+}
+
+ForeignTransactionHandle TransactionContext::ForeignTransactionLookup(const Identifier &db_name) {
+	lock_guard<mutex> guard(transaction_lock);
+	if (!current_transaction) {
+		return {};
+	}
+	return current_transaction->GetSharedDuckTransaction(db_name);
+}
+
+void TransactionContext::JoinTransaction(const string &transaction_id) {
+	if (auto_commit || !current_transaction) {
+		throw TransactionException("JOIN TRANSACTION can only be used inside an explicit transaction");
+	}
+	constexpr idx_t MAX_TRANSACTION_ID_LENGTH = 1024;
+	if (transaction_id.empty()) {
+		throw TransactionException("JOIN TRANSACTION requires a non-empty transaction id");
+	}
+	if (transaction_id.size() > MAX_TRANSACTION_ID_LENGTH) {
+		throw TransactionException("JOIN TRANSACTION id exceeds the maximum length of %llu bytes",
+		                           static_cast<uint64_t>(MAX_TRANSACTION_ID_LENGTH));
+	}
+	for (auto character : transaction_id) {
+		auto byte = static_cast<unsigned char>(character);
+		if (byte < 0x20 || byte == 0x7f) {
+			throw TransactionException("JOIN TRANSACTION id contains a control character");
+		}
+	}
+
+	// Split at the first slash so database names may themselves contain slashes.
+	auto slash = transaction_id.find('/');
+	if (slash == string::npos || slash == 0 || slash + 1 == transaction_id.size()) {
+		throw TransactionException("Invalid transaction id '%s': expected '<connection_id>/<database_name>'",
+		                           transaction_id);
+	}
+	auto connection_string = transaction_id.substr(0, slash);
+	auto database_name = Identifier(transaction_id.substr(slash + 1));
+	uint64_t raw_connection_id;
+	if (!TryCast::Operation<string_t, uint64_t>(string_t(connection_string), raw_connection_id)) {
+		throw TransactionException("Invalid transaction id '%s': connection id is not a number", transaction_id);
+	}
+	auto connection_id = static_cast<connection_t>(raw_connection_id);
+	if (connection_id == context.GetConnectionId()) {
+		throw TransactionException("Cannot join a transaction owned by the same connection");
+	}
+
+	auto owner = ConnectionManager::Get(context).FindByConnectionId(connection_id);
+	if (!owner) {
+		throw TransactionException("Invalid transaction id '%s': owning connection is no longer available",
+		                           transaction_id);
+	}
+	auto handle = owner->transaction.ForeignTransactionLookup(database_name);
+	if (!handle.transaction) {
+		throw TransactionException("Invalid transaction id '%s': owning transaction is no longer available",
+		                           transaction_id);
+	}
+
+	try {
+		current_transaction->Adopt(*handle.database, handle.transaction);
+	} catch (...) {
+		// Complete the handoff if the owner detached while this lookup was in flight.
+		shared_ptr<Transaction> transaction = std::move(handle.transaction);
+		(void)transaction->Finalize(transaction, context, false);
+		throw;
+	}
 }
 
 idx_t TransactionContext::GetActiveQuery() {
