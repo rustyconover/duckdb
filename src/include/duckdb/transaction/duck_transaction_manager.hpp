@@ -99,8 +99,9 @@ protected:
 	};
 
 private:
-	ErrorData CommitTransactionInternal(ClientContext &context, DuckTransaction &transaction);
-	void RollbackTransactionInternal(DuckTransaction &transaction);
+	ErrorData CommitTransactionInternal(ClientContext &context, DuckTransaction &transaction,
+	                                    shared_ptr<ClientContext> &released_context);
+	void RollbackTransactionInternal(DuckTransaction &transaction, shared_ptr<ClientContext> &released_context);
 	void RemoveSharedTransaction(DuckTransaction &transaction);
 
 	//! Generates a new commit timestamp

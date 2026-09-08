@@ -293,6 +293,21 @@ void ClientContext::Destroy() {
 	CleanupInternal(*lock);
 }
 
+void ClientContext::AddSharedTransactionPin() {
+	shared_transaction_pins.fetch_add(1);
+}
+
+void ClientContext::RemoveSharedTransactionPin() {
+	auto previous_count = shared_transaction_pins.fetch_sub(1);
+	D_ASSERT(previous_count > 0);
+}
+
+void ClientContext::DestroyIfSharedTransactionPinned() {
+	if (shared_transaction_pins.load() > 0) {
+		Destroy();
+	}
+}
+
 void ClientContext::ProcessError(ErrorData &error, const string &query) const {
 	error.FinalizeError();
 	if (Settings::Get<ErrorsAsJSONSetting>(*this)) {

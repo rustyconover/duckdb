@@ -45,6 +45,7 @@ Connection::~Connection() {
 		return;
 	}
 	ConnectionManager::Get(*context->db).RemoveConnection(*context);
+	context->DestroyIfSharedTransactionPinned();
 }
 
 string Connection::GetProfilingInformation(const ProfilerPrintFormat &format) {

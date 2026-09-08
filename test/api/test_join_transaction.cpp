@@ -326,3 +326,31 @@ TEST_CASE("A shared transaction outlives its originating connection", "[api][joi
 	auto result = setup.Query("SELECT value FROM shared_values ORDER BY value");
 	REQUIRE(CHECK_COLUMN(result, 0, {1, 2}));
 }
+
+TEST_CASE("Closing an exporter rolls back its later transaction", "[api][join_transaction]") {
+	DuckDB database(nullptr);
+	Connection setup(database);
+	Connection joiner(database);
+	REQUIRE_NO_FAIL(setup.Query("CREATE TABLE shared_values (value INTEGER)"));
+	REQUIRE_NO_FAIL(setup.Query("CREATE TABLE private_values (id INTEGER PRIMARY KEY, value INTEGER)"));
+	REQUIRE_NO_FAIL(setup.Query("INSERT INTO private_values VALUES (1, 0)"));
+
+	{
+		Connection owner(database);
+		REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+		REQUIRE_NO_FAIL(owner.Query("INSERT INTO shared_values VALUES (1)"));
+		JoinTransaction(joiner, ShareTransaction(owner));
+		REQUIRE_NO_FAIL(owner.Query("COMMIT"));
+
+		REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+		REQUIRE_NO_FAIL(owner.Query("UPDATE private_values SET value = 1 WHERE id = 1"));
+	}
+
+	// The later transaction is rolled back as soon as the owner connection closes.
+	REQUIRE_NO_FAIL(setup.Query("UPDATE private_values SET value = 2 WHERE id = 1"));
+	REQUIRE_NO_FAIL(joiner.Query("COMMIT"));
+	auto result = setup.Query("SELECT value FROM shared_values");
+	REQUIRE(CHECK_COLUMN(result, 0, {1}));
+	result = setup.Query("SELECT value FROM private_values");
+	REQUIRE(CHECK_COLUMN(result, 0, {2}));
+}

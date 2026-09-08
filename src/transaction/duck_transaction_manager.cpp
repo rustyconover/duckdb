@@ -25,6 +25,20 @@
 
 namespace duckdb {
 
+namespace {
+
+struct SharedContextRelease {
+	~SharedContextRelease() {
+		if (context) {
+			context->RemoveSharedTransactionPin();
+		}
+	}
+
+	shared_ptr<ClientContext> context;
+};
+
+} // namespace
+
 static ErrorData BuildAutocheckpointError(AttachedDatabase &db, const std::exception &ex) {
 	ErrorData original(ex);
 	string recovery = db.IsInitialDatabase() ? "Reopen the database instance to recover."
@@ -351,7 +365,8 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 			}
 			if (transaction.share_count > 0) {
 				auto transaction_context = transaction.context.lock();
-				if (!rollback_requested && transaction_context.get() == &context) {
+				if (!rollback_requested && transaction_context.get() == &context && !transaction.shared_context) {
+					context.AddSharedTransactionPin();
 					transaction.shared_context = std::move(transaction_context);
 				}
 				return error;
@@ -359,14 +374,16 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 			RemoveSharedTransaction(transaction);
 		}
 	}
+	SharedContextRelease released_context;
 	if (rollback_requested) {
-		RollbackTransactionInternal(transaction);
+		RollbackTransactionInternal(transaction, released_context.context);
 		return error;
 	}
-	return CommitTransactionInternal(context, transaction);
+	return CommitTransactionInternal(context, transaction, released_context.context);
 }
 
-ErrorData DuckTransactionManager::CommitTransactionInternal(ClientContext &context, DuckTransaction &transaction) {
+ErrorData DuckTransactionManager::CommitTransactionInternal(ClientContext &context, DuckTransaction &transaction,
+                                                            shared_ptr<ClientContext> &released_context) {
 	// flush the transaction-local blocks of bulk appends before taking any commit locks (see PreFlushOptimisticBlocks)
 	ErrorData error = transaction.PreFlushOptimisticBlocks(db);
 	unique_lock<mutex> t_lock(transaction_lock);
@@ -495,7 +512,7 @@ ErrorData DuckTransactionManager::CommitTransactionInternal(ClientContext &conte
 	bool store_transaction = undo_properties.has_updates || undo_properties.has_index_deletes ||
 	                         undo_properties.has_catalog_changes || error.HasError();
 
-	transaction.shared_context.reset();
+	released_context = std::move(transaction.shared_context);
 	// Remove the transaction from the list of active transactions and gather cleanup information.
 	QueueCleanup(RemoveTransaction(transaction, store_transaction, CreateCleanupInfo()));
 
@@ -550,10 +567,12 @@ void DuckTransactionManager::RollbackTransaction(Transaction &transaction_p) {
 			RemoveSharedTransaction(transaction);
 		}
 	}
-	RollbackTransactionInternal(transaction);
+	SharedContextRelease released_context;
+	RollbackTransactionInternal(transaction, released_context.context);
 }
 
-void DuckTransactionManager::RollbackTransactionInternal(DuckTransaction &transaction) {
+void DuckTransactionManager::RollbackTransactionInternal(DuckTransaction &transaction,
+                                                         shared_ptr<ClientContext> &released_context) {
 	DUCKDB_LOG(db.GetDatabase(), TransactionLogType, db, "Rollback", transaction.GetTransactionId());
 
 	ErrorData error;
@@ -562,7 +581,7 @@ void DuckTransactionManager::RollbackTransactionInternal(DuckTransaction &transa
 		lock_guard<mutex> t_lock(transaction_lock);
 		error = transaction.Rollback();
 
-		transaction.shared_context.reset();
+		released_context = std::move(transaction.shared_context);
 		// Remove the transaction from the list of active transactions and gather cleanup information.
 		QueueCleanup(RemoveTransaction(transaction, CreateCleanupInfo()));
 	}

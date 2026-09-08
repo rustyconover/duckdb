@@ -182,6 +182,11 @@ public:
 
 	//! Destroy the client context
 	DUCKDB_API void Destroy();
+	//! Track a shared transaction that still requires this context's storage state.
+	void AddSharedTransactionPin();
+	void RemoveSharedTransactionPin();
+	//! Destroy this context on connection close when a shared transaction would otherwise keep it alive.
+	void DestroyIfSharedTransactionPinned();
 
 	//! Get the table info of a specific table, or nullptr if it cannot be found.
 	DUCKDB_API unique_ptr<TableDescription> TableInfo(const Identifier &database_name, const Identifier &schema_name,
@@ -340,6 +345,8 @@ private:
 private:
 	//! Lock on using the ClientContext in parallel
 	mutex context_lock;
+	//! Shared transactions retaining this context after their exporter commits.
+	atomic<idx_t> shared_transaction_pins {0};
 	//! The currently active query context
 	unique_ptr<ActiveQueryContext> active_query;
 	//! The current query progress

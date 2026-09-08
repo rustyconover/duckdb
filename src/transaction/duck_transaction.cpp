@@ -48,6 +48,7 @@ SnapshotView DuckTransaction::GetSnapshotView() const {
 }
 
 DuckTransaction::~DuckTransaction() {
+	D_ASSERT(!shared_context);
 }
 
 DuckTransaction &DuckTransaction::Get(ClientContext &context, AttachedDatabase &db) {
