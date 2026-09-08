@@ -107,15 +107,25 @@ public:
 		is_checkpoint_transaction = true;
 	}
 
-	bool RollbackRequested() const {
-		return rollback_requested.load();
+	bool IsShared() const {
+		return is_shared.load();
 	}
-	ErrorData Finalize(shared_ptr<Transaction> &self, ClientContext &context, bool rollback) override;
 	shared_ptr<mutex> GetStatementLock() const {
 		return statement_lock;
 	}
 
 private:
+	friend class DuckTransactionManager;
+
+	//! Number of connections currently participating. Guarded by the transaction manager lock.
+	idx_t share_count = 0;
+	//! Capability used to find this transaction in the manager's shared transaction container.
+	string share_token;
+	//! Any rollback vote dooms the shared transaction. Guarded by the transaction manager lock.
+	bool rollback_requested = false;
+	//! Set once the transaction is exported. It stays set for the transaction's lifetime.
+	atomic<bool> is_shared {false};
+
 	//! The undo buffer is used to store old versions of rows that are updated
 	//! or deleted
 	UndoBuffer undo_buffer;
@@ -139,10 +149,7 @@ private:
 	reference_map_t<DataTableInfo, unique_ptr<ActiveTableLock>> active_locks;
 	//! Flag to prevent auto-checkpointing inside a checkpoint transaction.
 	bool is_checkpoint_transaction = false;
-	//! Any rollback vote dooms the shared transaction.
-	atomic<bool> rollback_requested {false};
-	//! Shared so finalizers and statement guards can safely outlive the transaction object.
-	shared_ptr<mutex> finalize_lock;
+	//! Shared so statement guards can safely outlive the transaction object.
 	shared_ptr<mutex> statement_lock;
 };
 

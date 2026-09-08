@@ -8,6 +8,8 @@
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/transaction/duck_transaction_manager.hpp"
 
 namespace duckdb {
 
@@ -34,10 +36,6 @@ unique_ptr<FunctionData> ShareTransactionBind(BindScalarFunctionInput &input) {
 		throw TransactionException("duckdb_share_transaction() must be called inside an explicit transaction");
 	}
 	auto &meta_transaction = context.transaction.ActiveTransaction();
-	if (!meta_transaction.GetSharedTransactionId().empty()) {
-		return make_uniq<ShareTransactionData>(meta_transaction.GetSharedTransactionId());
-	}
-
 	optional_ptr<AttachedDatabase> database = meta_transaction.ModifiedDatabase();
 	if (!database) {
 		auto &database_manager = DatabaseManager::Get(context);
@@ -52,9 +50,11 @@ unique_ptr<FunctionData> ShareTransactionBind(BindScalarFunctionInput &input) {
 	if (!transaction.IsDuckTransaction()) {
 		throw TransactionException("Database '%s' does not support shared transactions", database->GetName());
 	}
-	auto transaction_id = StringUtil::Format("%llu/%s", static_cast<uint64_t>(context.GetConnectionId()),
-	                                         database->GetName().GetIdentifierName());
-	meta_transaction.SetSharedTransactionId(transaction_id);
+	auto &duck_transaction = transaction.Cast<DuckTransaction>();
+	shared_ptr<DuckTransaction> handle;
+	auto token = duck_transaction.GetTransactionManager().ShareTransaction(duck_transaction, handle);
+	meta_transaction.SetSharedTransaction(*database, std::move(handle));
+	auto transaction_id = StringUtil::Format("%s/%s", token, database->GetName().GetIdentifierName());
 	return make_uniq<ShareTransactionData>(std::move(transaction_id));
 }
 

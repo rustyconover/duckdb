@@ -10,7 +10,6 @@
 
 #include "duckdb/catalog/catalog_entry/sequence_catalog_entry.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
-#include "duckdb/common/error_data.hpp"
 #include "duckdb/transaction/transaction_data.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/atomic.hpp"
@@ -66,9 +65,6 @@ public:
 	virtual bool IsDuckTransaction() const {
 		return false;
 	}
-	//! Finalize this MetaTransaction's reference. DuckTransaction overrides this to defer
-	//! storage-layer finalization until the last participating MetaTransaction detaches.
-	DUCKDB_API virtual ErrorData Finalize(shared_ptr<Transaction> &self, ClientContext &context, bool rollback);
 	//! What this transaction sees. A transaction without MVCC state of its own sees everything.
 	virtual SnapshotView GetSnapshotView() const {
 		return SnapshotView(transaction_t(-1), VisibilityBound::IncludingUncommitted());

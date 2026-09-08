@@ -39,8 +39,7 @@ DuckTransaction::DuckTransaction(DuckTransactionManager &manager, ClientContext 
                                  SnapshotView view_p, idx_t catalog_version_p)
     : Transaction(manager, context_p), start_time(start_time), view(view_p), commit_id(0),
       catalog_version(catalog_version_p), awaiting_cleanup(false), undo_buffer(*this, context_p),
-      storage(make_uniq<LocalStorage>(context_p, *this)), finalize_lock(make_shared_ptr<mutex>()),
-      statement_lock(make_shared_ptr<mutex>()) {
+      storage(make_uniq<LocalStorage>(context_p, *this)), statement_lock(make_shared_ptr<mutex>()) {
 	D_ASSERT(IsCommitted(start_time) && !IsCommitted(view.transaction_id));
 }
 
@@ -49,39 +48,6 @@ SnapshotView DuckTransaction::GetSnapshotView() const {
 }
 
 DuckTransaction::~DuckTransaction() {
-}
-
-ErrorData DuckTransaction::Finalize(shared_ptr<Transaction> &self, ClientContext &context, bool rollback) {
-	D_ASSERT(self.get() == this);
-	if (rollback) {
-		rollback_requested.store(true);
-	}
-
-	ErrorData error;
-	auto lock = finalize_lock;
-	lock_guard<mutex> guard(*lock);
-	if (RollbackRequested() && !rollback) {
-		error = ErrorData(ExceptionType::TRANSACTION,
-		                  "Cannot commit shared transaction: another connection has rolled back");
-	}
-
-	// The transaction manager and this MetaTransaction are the final two owners.
-	if (self.use_count() == 2) {
-		try {
-			if (RollbackRequested()) {
-				manager.RollbackTransaction(*this);
-			} else {
-				auto commit_error = manager.CommitTransaction(context, *this);
-				if (commit_error.HasError()) {
-					error.Merge(commit_error);
-				}
-			}
-		} catch (std::exception &ex) {
-			error.Merge(ErrorData(ex));
-		}
-	}
-	self.reset();
-	return error;
 }
 
 DuckTransaction &DuckTransaction::Get(ClientContext &context, AttachedDatabase &db) {

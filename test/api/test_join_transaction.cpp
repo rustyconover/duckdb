@@ -46,6 +46,26 @@ TEST_CASE("Transactions can be shared between connections", "[api][join_transact
 	REQUIRE(CHECK_COLUMN(result, 0, {1, 2}));
 }
 
+TEST_CASE("Participants can join after the exporter commits", "[api][join_transaction]") {
+	DuckDB database(nullptr);
+	Connection owner(database);
+	Connection first_joiner(database);
+	Connection late_joiner(database);
+
+	REQUIRE_NO_FAIL(owner.Query("CREATE TABLE shared_values (value INTEGER)"));
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	REQUIRE_NO_FAIL(owner.Query("INSERT INTO shared_values VALUES (1)"));
+	auto transaction_id = ShareTransaction(owner);
+	JoinTransaction(first_joiner, transaction_id);
+	REQUIRE_NO_FAIL(owner.Query("COMMIT"));
+
+	JoinTransaction(late_joiner, transaction_id);
+	auto result = late_joiner.Query("SELECT value FROM shared_values");
+	REQUIRE(CHECK_COLUMN(result, 0, {1}));
+	REQUIRE_NO_FAIL(first_joiner.Query("COMMIT"));
+	REQUIRE_NO_FAIL(late_joiner.Query("COMMIT"));
+}
+
 TEST_CASE("Rollback dooms a shared transaction", "[api][join_transaction]") {
 	DuckDB database(nullptr);
 	Connection setup(database);
@@ -131,6 +151,50 @@ TEST_CASE("Shared transaction ids are stable and preserve catalog names", "[api]
 	REQUIRE_NO_FAIL(joiner.Query("COMMIT"));
 }
 
+TEST_CASE("Shared transaction ids are exact capabilities and expire", "[api][join_transaction]") {
+	DuckDB database(nullptr);
+	Connection owner(database);
+	Connection joiner(database);
+
+	REQUIRE_NO_FAIL(owner.Query("CREATE TABLE shared_values (value INTEGER)"));
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	REQUIRE_NO_FAIL(owner.Query("INSERT INTO shared_values VALUES (1)"));
+	auto transaction_id = ShareTransaction(owner);
+	auto tampered_id = transaction_id;
+	tampered_id[0] = tampered_id[0] == '0' ? '1' : '0';
+	REQUIRE_NO_FAIL(joiner.Query("BEGIN"));
+	REQUIRE_FAIL(joiner.Query("JOIN TRANSACTION '" + tampered_id + "'"));
+	REQUIRE_NO_FAIL(joiner.Query("ROLLBACK"));
+	REQUIRE_NO_FAIL(owner.Query("COMMIT"));
+
+	// Starting another transaction against the same database must not revive the old capability.
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	REQUIRE_NO_FAIL(owner.Query("SELECT count(*) FROM shared_values"));
+	REQUIRE_NO_FAIL(joiner.Query("BEGIN"));
+	REQUIRE_FAIL(joiner.Query("JOIN TRANSACTION '" + transaction_id + "'"));
+	REQUIRE_NO_FAIL(joiner.Query("ROLLBACK"));
+	REQUIRE_NO_FAIL(owner.Query("ROLLBACK"));
+}
+
+TEST_CASE("JOIN TRANSACTION replaces an unused local DuckTransaction", "[api][join_transaction]") {
+	DuckDB database(nullptr);
+	Connection owner(database);
+	Connection joiner(database);
+
+	REQUIRE_NO_FAIL(owner.Query("CREATE TABLE shared_values (value INTEGER)"));
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	REQUIRE_NO_FAIL(owner.Query("INSERT INTO shared_values VALUES (42)"));
+	auto transaction_id = ShareTransaction(owner);
+
+	REQUIRE_NO_FAIL(joiner.Query("BEGIN"));
+	REQUIRE_NO_FAIL(joiner.Query("SELECT count(*) FROM shared_values"));
+	REQUIRE_NO_FAIL(joiner.Query("JOIN TRANSACTION '" + transaction_id + "'"));
+	auto result = joiner.Query("SELECT value FROM shared_values");
+	REQUIRE(CHECK_COLUMN(result, 0, {42}));
+	REQUIRE_NO_FAIL(owner.Query("COMMIT"));
+	REQUIRE_NO_FAIL(joiner.Query("COMMIT"));
+}
+
 TEST_CASE("JOIN TRANSACTION validates its context and id", "[api][join_transaction]") {
 	DuckDB database(nullptr);
 	Connection connection(database);
@@ -141,19 +205,6 @@ TEST_CASE("JOIN TRANSACTION validates its context and id", "[api][join_transacti
 	REQUIRE_FAIL(connection.Query("JOIN TRANSACTION 'invalid'"));
 	REQUIRE_FAIL(connection.Query("JOIN TRANSACTION 'abc/memory'"));
 	REQUIRE_NO_FAIL(connection.Query("ROLLBACK"));
-}
-
-TEST_CASE("Shared transactions reject ATTACH", "[api][join_transaction]") {
-	DuckDB database(nullptr);
-	Connection owner(database);
-	Connection joiner(database);
-
-	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
-	JoinTransaction(joiner, ShareTransaction(owner));
-	REQUIRE_FAIL(owner.Query("ATTACH ':memory:' AS owner_database"));
-	REQUIRE_FAIL(joiner.Query("ATTACH ':memory:' AS joiner_database"));
-	REQUIRE_NO_FAIL(owner.Query("COMMIT"));
-	REQUIRE_NO_FAIL(joiner.Query("COMMIT"));
 }
 
 TEST_CASE("Shared transactions use stable lock ordering across databases", "[api][join_transaction]") {

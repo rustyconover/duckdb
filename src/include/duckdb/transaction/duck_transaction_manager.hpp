@@ -41,8 +41,10 @@ public:
 
 	//! Start a new transaction
 	Transaction &StartTransaction(ClientContext &context) override;
-	//! Start a transaction and return an owning participation handle.
-	shared_ptr<DuckTransaction> StartTransactionShared(ClientContext &context);
+	//! Export an active transaction and return its capability.
+	string ShareTransaction(DuckTransaction &transaction, shared_ptr<DuckTransaction> &handle);
+	//! Import an explicitly shared transaction and register a new participant.
+	shared_ptr<DuckTransaction> JoinTransaction(const string &token);
 	//! Commit the given transaction
 	ErrorData CommitTransaction(ClientContext &context, Transaction &transaction) override;
 	//! Rollback the given transaction
@@ -97,6 +99,10 @@ protected:
 	};
 
 private:
+	ErrorData CommitTransactionInternal(ClientContext &context, DuckTransaction &transaction);
+	void RollbackTransactionInternal(DuckTransaction &transaction);
+	void RemoveSharedTransaction(DuckTransaction &transaction);
+
 	//! Generates a new commit timestamp
 	transaction_t GetCommitTimestamp();
 	//! Allocates the cleanup info, and reserves the space RemoveTransaction needs to re-home a transaction.
@@ -146,6 +152,8 @@ private:
 	vector<shared_ptr<DuckTransaction>> active_transactions;
 	//! Set of recently committed transactions
 	vector<shared_ptr<DuckTransaction>> recently_committed_transactions;
+	//! Capability lookup for explicitly shared transactions.
+	unordered_map<string, shared_ptr<DuckTransaction>> shared_transactions;
 	//! The lock used for transaction operations
 	mutex transaction_lock;
 	//! The checkpoint lock

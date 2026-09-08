@@ -320,13 +320,16 @@ void ClientContext::BeginQueryInternal(ClientContextLock &lock, const SQLStateme
 		transaction.BeginTransaction();
 	}
 
-	// Lock every already-open DuckTransaction in a stable order for the query duration.
+	// Lock every already-open shared DuckTransaction in a stable order for the query duration.
 	auto &meta_transaction = transaction.ActiveTransaction();
 	vector<shared_ptr<mutex>> statement_locks;
 	for (auto &database : meta_transaction.OpenedTransactions()) {
 		auto open_transaction = meta_transaction.TryGetTransaction(database.get());
 		if (open_transaction && open_transaction->IsDuckTransaction()) {
-			statement_locks.push_back(open_transaction->Cast<DuckTransaction>().GetStatementLock());
+			auto &duck_transaction = open_transaction->Cast<DuckTransaction>();
+			if (duck_transaction.IsShared()) {
+				statement_locks.push_back(duck_transaction.GetStatementLock());
+			}
 		}
 	}
 	if (!statement_locks.empty()) {
@@ -336,21 +339,8 @@ void ClientContext::BeginQueryInternal(ClientContextLock &lock, const SQLStateme
 		          });
 		vector<ActiveQueryContext::StatementGuard> statement_guards;
 		statement_guards.reserve(statement_locks.size());
-		{
-			struct ContextRelockGuard {
-				explicit ContextRelockGuard(ClientContextLock &lock_p) : lock(lock_p) {
-					lock.Unlock();
-				}
-				~ContextRelockGuard() {
-					lock.Lock();
-				}
-
-				ClientContextLock &lock;
-			};
-			ContextRelockGuard context_relock(lock);
-			for (auto &statement_lock : statement_locks) {
-				statement_guards.emplace_back(std::move(statement_lock));
-			}
+		for (auto &statement_lock : statement_locks) {
+			statement_guards.emplace_back(std::move(statement_lock));
 		}
 		active_query->statement_guards = std::move(statement_guards);
 	}

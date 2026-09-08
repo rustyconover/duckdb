@@ -13,7 +13,6 @@
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/optional_ptr.hpp"
-#include "duckdb/common/mutex.hpp"
 #include "duckdb/parser/parsed_data/transaction_info.hpp"
 
 namespace duckdb {
@@ -22,7 +21,6 @@ class ClientContext;
 class MetaTransaction;
 class Transaction;
 class TransactionManager;
-struct ForeignTransactionHandle;
 
 //! The transaction context keeps track of all the information relating to the
 //! current transaction
@@ -48,7 +46,6 @@ public:
 	void ClearTransaction();
 	void SetAutocheckpointError(ErrorData error);
 	void JoinTransaction(const string &transaction_id);
-	ForeignTransactionHandle ForeignTransactionLookup(const Identifier &db_name);
 
 	void SetAutoCommit(bool value);
 	bool IsAutoCommit() const {
@@ -78,8 +75,6 @@ private:
 	TransactionInvalidationPolicy invalidation_policy = TransactionInvalidationPolicy::STANDARD_POLICY;
 	bool auto_rollback = false;
 
-	//! Protects current_transaction from foreign connection lookups.
-	mutable mutex transaction_lock;
 	unique_ptr<MetaTransaction> current_transaction;
 	ErrorData autocheckpoint_error;
 
