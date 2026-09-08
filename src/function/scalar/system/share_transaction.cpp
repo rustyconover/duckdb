@@ -2,6 +2,7 @@
 
 #include "duckdb/common/exception/transaction_exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -15,23 +16,16 @@ namespace duckdb {
 
 namespace {
 
-struct ShareTransactionData : FunctionData {
-	explicit ShareTransactionData(string transaction_id_p) : transaction_id(std::move(transaction_id_p)) {
-	}
-
-	unique_ptr<FunctionData> Copy() const override {
-		return make_uniq<ShareTransactionData>(transaction_id);
-	}
-
-	bool Equals(const FunctionData &other_p) const override {
-		return transaction_id == other_p.Cast<ShareTransactionData>().transaction_id;
+struct ShareTransactionLocalState : FunctionLocalState {
+	explicit ShareTransactionLocalState(string transaction_id_p) : transaction_id(std::move(transaction_id_p)) {
 	}
 
 	string transaction_id;
 };
 
-unique_ptr<FunctionData> ShareTransactionBind(BindScalarFunctionInput &input) {
-	auto &context = input.GetClientContext();
+unique_ptr<FunctionLocalState> ShareTransactionInit(ExpressionState &state, const BoundFunctionExpression &,
+                                                    FunctionData *) {
+	auto &context = state.GetContext();
 	if (!context.transaction.HasActiveTransaction() || context.transaction.IsAutoCommit()) {
 		throw TransactionException("duckdb_share_transaction() must be called inside an explicit transaction");
 	}
@@ -55,20 +49,22 @@ unique_ptr<FunctionData> ShareTransactionBind(BindScalarFunctionInput &input) {
 	auto token = duck_transaction.GetTransactionManager().ShareTransaction(duck_transaction, handle);
 	meta_transaction.SetSharedTransaction(*database, std::move(handle));
 	auto transaction_id = StringUtil::Format("%s/%s", token, database->GetName().GetIdentifierName());
-	return make_uniq<ShareTransactionData>(std::move(transaction_id));
+	return make_uniq<ShareTransactionLocalState>(std::move(transaction_id));
 }
 
 void ShareTransactionFunction(DataChunk &input, ExpressionState &state, Vector &result) {
-	auto &expression = state.expr.Cast<BoundFunctionExpression>();
-	auto &data = expression.BindInfo()->Cast<ShareTransactionData>();
+	auto &data = ExecuteFunctionState::GetFunctionState(state)->Cast<ShareTransactionLocalState>();
 	result.Reference(Value(data.transaction_id), count_t(input.size()));
 }
 
 } // namespace
 
 ScalarFunction ShareTransactionFun::GetFunction() {
-	return ScalarFunction({}, LogicalType::VARCHAR, ShareTransactionFunction, ShareTransactionBind, nullptr, nullptr,
-	                      LogicalType(LogicalTypeId::INVALID), FunctionStability::VOLATILE);
+	ScalarFunction function({}, LogicalType::VARCHAR, ShareTransactionFunction, nullptr, nullptr, ShareTransactionInit);
+	function.SetVolatile();
+	function.SetFallible();
+	function.SetRequiresOrderedExecution(true);
+	return function;
 }
 
 } // namespace duckdb

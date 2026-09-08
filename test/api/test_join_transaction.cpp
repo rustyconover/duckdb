@@ -151,6 +151,41 @@ TEST_CASE("Shared transaction ids are stable and preserve catalog names", "[api]
 	REQUIRE_NO_FAIL(joiner.Query("COMMIT"));
 }
 
+TEST_CASE("Sharing occurs when the function executes", "[api][join_transaction]") {
+	DuckDB database(nullptr);
+	Connection owner(database);
+	Connection joiner(database);
+
+	// Binding and explaining the function must not require or export a transaction.
+	auto prepared = owner.Prepare("SELECT duckdb_share_transaction()");
+	REQUIRE(!prepared->HasError());
+	REQUIRE_NO_FAIL(owner.Query("EXPLAIN SELECT duckdb_share_transaction()"));
+
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	auto result = prepared->Execute();
+	REQUIRE_NO_FAIL(*result);
+	auto chunk = result->Fetch();
+	REQUIRE(chunk);
+	auto first_id = chunk->GetValue(0, 0).GetValue<string>();
+	result.reset();
+	JoinTransaction(joiner, first_id);
+	REQUIRE_NO_FAIL(owner.Query("COMMIT"));
+	REQUIRE_NO_FAIL(joiner.Query("COMMIT"));
+
+	// A new execution must export the current transaction instead of returning a cached capability.
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	result = prepared->Execute();
+	REQUIRE_NO_FAIL(*result);
+	chunk = result->Fetch();
+	REQUIRE(chunk);
+	auto second_id = chunk->GetValue(0, 0).GetValue<string>();
+	result.reset();
+	REQUIRE(second_id != first_id);
+	JoinTransaction(joiner, second_id);
+	REQUIRE_NO_FAIL(owner.Query("COMMIT"));
+	REQUIRE_NO_FAIL(joiner.Query("COMMIT"));
+}
+
 TEST_CASE("Shared transaction ids are exact capabilities and expire", "[api][join_transaction]") {
 	DuckDB database(nullptr);
 	Connection owner(database);
