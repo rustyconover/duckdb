@@ -336,11 +336,13 @@ void DuckTransactionManager::CleanupTransactions() {
 
 ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction_p) {
 	auto &transaction = transaction_p.Cast<DuckTransaction>();
+	bool was_shared = false;
 	bool rollback_requested = false;
 	ErrorData error;
 	{
 		lock_guard<mutex> lock(transaction_lock);
 		if (transaction.share_count > 0) {
+			was_shared = true;
 			transaction.share_count--;
 			rollback_requested = transaction.rollback_requested;
 			if (rollback_requested) {
@@ -348,6 +350,10 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 				                  "Cannot commit shared transaction: another connection has rolled back");
 			}
 			if (transaction.share_count > 0) {
+				auto transaction_context = transaction.context.lock();
+				if (!rollback_requested && transaction_context.get() == &context) {
+					transaction.shared_context = std::move(transaction_context);
+				}
 				return error;
 			}
 			RemoveSharedTransaction(transaction);
@@ -355,9 +361,14 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	}
 	if (rollback_requested) {
 		RollbackTransactionInternal(transaction);
+		transaction.shared_context.reset();
 		return error;
 	}
-	return CommitTransactionInternal(context, transaction);
+	auto result = CommitTransactionInternal(context, transaction);
+	if (was_shared) {
+		transaction.shared_context.reset();
+	}
+	return result;
 }
 
 ErrorData DuckTransactionManager::CommitTransactionInternal(ClientContext &context, DuckTransaction &transaction) {
@@ -532,9 +543,11 @@ ErrorData DuckTransactionManager::CommitTransactionInternal(ClientContext &conte
 
 void DuckTransactionManager::RollbackTransaction(Transaction &transaction_p) {
 	auto &transaction = transaction_p.Cast<DuckTransaction>();
+	bool was_shared = false;
 	{
 		lock_guard<mutex> lock(transaction_lock);
 		if (transaction.share_count > 0) {
+			was_shared = true;
 			transaction.rollback_requested = true;
 			transaction.share_count--;
 			if (transaction.share_count > 0) {
@@ -544,6 +557,9 @@ void DuckTransactionManager::RollbackTransaction(Transaction &transaction_p) {
 		}
 	}
 	RollbackTransactionInternal(transaction);
+	if (was_shared) {
+		transaction.shared_context.reset();
+	}
 }
 
 void DuckTransactionManager::RollbackTransactionInternal(DuckTransaction &transaction) {

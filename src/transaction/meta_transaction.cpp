@@ -128,12 +128,34 @@ void MetaTransaction::SetSharedTransaction(AttachedDatabase &db, shared_ptr<Duck
 	auto entry = transactions.find(db);
 	D_ASSERT(entry != transactions.end());
 	D_ASSERT(RefersToSameObject(entry->second.transaction, *transaction));
+	D_ASSERT(!shared_database || RefersToSameObject(*shared_database, db));
+	shared_database = &db;
 	entry->second.participation = std::move(transaction);
+}
+
+void MetaTransaction::ValidateSharedTransaction(AttachedDatabase &db) {
+	lock_guard<mutex> guard(lock);
+	if (shared_database && !RefersToSameObject(*shared_database, db)) {
+		throw TransactionException("Cannot participate in shared transactions for multiple databases");
+	}
+	if (modified_database && !RefersToSameObject(*modified_database, db)) {
+		throw TransactionException("Cannot share transaction for database '%s': this transaction has already modified "
+		                           "database '%s'",
+		                           db.GetName(), modified_database->GetName());
+	}
 }
 
 void MetaTransaction::Adopt(AttachedDatabase &db, shared_ptr<DuckTransaction> transaction) {
 	D_ASSERT(transaction);
 	lock_guard<mutex> guard(lock);
+	if (shared_database && !RefersToSameObject(*shared_database, db)) {
+		throw TransactionException("Cannot participate in shared transactions for multiple databases");
+	}
+	if (modified_database && !RefersToSameObject(*modified_database, db)) {
+		throw TransactionException("Cannot join transaction for database '%s': this transaction has already modified "
+		                           "database '%s'",
+		                           db.GetName(), modified_database->GetName());
+	}
 	auto entry = transactions.find(db);
 	if (entry != transactions.end()) {
 		auto &current = entry->second.transaction;
@@ -149,6 +171,7 @@ void MetaTransaction::Adopt(AttachedDatabase &db, shared_ptr<DuckTransaction> tr
 		db.GetTransactionManager().RollbackTransaction(current);
 		transactions.erase(entry);
 		transactions.insert({reference<AttachedDatabase>(db), TransactionReference(std::move(transaction))});
+		shared_database = &db;
 		return;
 	}
 #ifdef DEBUG
@@ -159,6 +182,7 @@ void MetaTransaction::Adopt(AttachedDatabase &db, shared_ptr<DuckTransaction> tr
 	all_transactions.reserve(all_transactions.size() + 1);
 	transactions.insert({reference<AttachedDatabase>(db), TransactionReference(std::move(transaction))});
 	all_transactions.push_back(db);
+	shared_database = &db;
 }
 
 ErrorData MetaTransaction::Commit() {
@@ -304,6 +328,11 @@ void MetaTransaction::ModifyDatabase(AttachedDatabase &db, DatabaseModificationT
 	if (IsReadOnly()) {
 		throw TransactionException("Cannot write to database \"%s\" - transaction is launched in read-only mode",
 		                           db.GetName());
+	}
+	if (!db.IsSystem() && !db.IsTemporary() && shared_database && !RefersToSameObject(*shared_database, db)) {
+		throw TransactionException("Cannot write to database '%s' while participating in a shared transaction for "
+		                           "database '%s'",
+		                           db.GetName(), shared_database->GetName());
 	}
 	auto &transaction = GetTransaction(db);
 	if (transaction.IsReadOnly()) {

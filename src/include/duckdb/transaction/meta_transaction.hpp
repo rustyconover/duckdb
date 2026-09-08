@@ -65,6 +65,7 @@ public:
 	Transaction &GetTransaction(AttachedDatabase &db);
 	optional_ptr<Transaction> TryGetTransaction(AttachedDatabase &db);
 	void RemoveTransaction(AttachedDatabase &db);
+	void ValidateSharedTransaction(AttachedDatabase &db);
 	void SetSharedTransaction(AttachedDatabase &db, shared_ptr<DuckTransaction> transaction);
 	void Adopt(AttachedDatabase &db, shared_ptr<DuckTransaction> transaction);
 
@@ -81,6 +82,9 @@ public:
 	void ModifyDatabase(AttachedDatabase &db, DatabaseModificationType modification);
 	optional_ptr<AttachedDatabase> ModifiedDatabase() {
 		return modified_database;
+	}
+	optional_ptr<AttachedDatabase> SharedDatabase() {
+		return shared_database;
 	}
 	const vector<reference<AttachedDatabase>> &OpenedTransactions() const {
 		return all_transactions;
@@ -101,6 +105,8 @@ private:
 	vector<reference<AttachedDatabase>> all_transactions;
 	//! The database we are modifying. We can only modify one database per meta transaction.
 	optional_ptr<AttachedDatabase> modified_database;
+	//! The database whose transaction is shared. Only this database may be modified.
+	optional_ptr<AttachedDatabase> shared_database;
 	//! Whether the meta transaction is marked as read only.
 	bool is_read_only;
 	//! Lock for referenced_databases.

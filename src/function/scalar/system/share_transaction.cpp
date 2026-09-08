@@ -7,6 +7,7 @@
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database_manager.hpp"
+#include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
@@ -23,16 +24,75 @@ struct ShareTransactionLocalState : FunctionLocalState {
 	string transaction_id;
 };
 
+struct ShareTransactionBindData : FunctionData {
+	ShareTransactionBindData() : has_database(false) {
+	}
+	explicit ShareTransactionBindData(string database_p) : has_database(true), database(std::move(database_p)) {
+	}
+
+	unique_ptr<FunctionData> Copy() const override {
+		if (!has_database) {
+			return make_uniq<ShareTransactionBindData>();
+		}
+		return make_uniq<ShareTransactionBindData>(database);
+	}
+
+	bool Equals(const FunctionData &other_p) const override {
+		auto &other = other_p.Cast<ShareTransactionBindData>();
+		return has_database == other.has_database && database == other.database;
+	}
+
+	bool has_database;
+	string database;
+};
+
+unique_ptr<FunctionData> ShareTransactionBind(BindScalarFunctionInput &input) {
+	if (input.HasBinder()) {
+		input.GetBinder().GetStatementProperties().output_type = QueryResultOutputType::FORCE_MATERIALIZED;
+	}
+	auto database = input.GetConstant(0);
+	if (database.IsNull()) {
+		return make_uniq<ShareTransactionBindData>();
+	}
+	return make_uniq<ShareTransactionBindData>(database.GetValue<string>());
+}
+
 unique_ptr<FunctionLocalState> ShareTransactionInit(ExpressionState &state, const BoundFunctionExpression &,
-                                                    FunctionData *) {
+                                                    FunctionData *bind_data_p) {
 	auto &context = state.GetContext();
 	if (!context.transaction.HasActiveTransaction() || context.transaction.IsAutoCommit()) {
 		throw TransactionException("duckdb_share_transaction() must be called inside an explicit transaction");
 	}
 	auto &meta_transaction = context.transaction.ActiveTransaction();
-	optional_ptr<AttachedDatabase> database = meta_transaction.ModifiedDatabase();
+	auto &database_manager = DatabaseManager::Get(context);
+	auto &bind_data = bind_data_p->Cast<ShareTransactionBindData>();
+	optional_ptr<AttachedDatabase> database;
+	if (bind_data.has_database) {
+		auto named_database = database_manager.GetDatabase(context, Identifier(bind_data.database));
+		if (!named_database) {
+			throw TransactionException("duckdb_share_transaction(): database '%s' does not exist", bind_data.database);
+		}
+		database = named_database.get();
+	} else {
+		database = meta_transaction.SharedDatabase();
+		if (!database) {
+			database = meta_transaction.ModifiedDatabase();
+		}
+		if (!database) {
+			for (auto &opened_database : meta_transaction.OpenedTransactions()) {
+				auto &candidate = opened_database.get();
+				if (candidate.IsSystem() || candidate.IsTemporary()) {
+					continue;
+				}
+				if (database) {
+					throw TransactionException(
+					    "duckdb_share_transaction(): database is ambiguous; pass a database name");
+				}
+				database = &candidate;
+			}
+		}
+	}
 	if (!database) {
-		auto &database_manager = DatabaseManager::Get(context);
 		auto name = database_manager.GetDefaultDatabase(context);
 		auto default_database = database_manager.GetDatabase(context, name);
 		if (!default_database) {
@@ -40,6 +100,7 @@ unique_ptr<FunctionLocalState> ShareTransactionInit(ExpressionState &state, cons
 		}
 		database = default_database.get();
 	}
+	meta_transaction.ValidateSharedTransaction(*database);
 	auto &transaction = meta_transaction.GetTransaction(*database);
 	if (!transaction.IsDuckTransaction()) {
 		throw TransactionException("Database '%s' does not support shared transactions", database->GetName());
@@ -60,9 +121,12 @@ void ShareTransactionFunction(DataChunk &input, ExpressionState &state, Vector &
 } // namespace
 
 ScalarFunction ShareTransactionFun::GetFunction() {
-	ScalarFunction function({}, LogicalType::VARCHAR, ShareTransactionFunction, nullptr, nullptr, ShareTransactionInit);
+	ScalarFunction function({FunctionParameter("database", LogicalType::VARCHAR, Value(LogicalTypeId::SQLNULL))},
+	                        LogicalType::VARCHAR, ShareTransactionFunction, ShareTransactionBind, nullptr,
+	                        ShareTransactionInit);
 	function.SetVolatile();
 	function.SetFallible();
+	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	function.SetRequiresOrderedExecution(true);
 	return function;
 }

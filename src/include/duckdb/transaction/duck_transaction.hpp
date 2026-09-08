@@ -123,6 +123,8 @@ private:
 	string share_token;
 	//! Any rollback vote dooms the shared transaction. Guarded by the transaction manager lock.
 	bool rollback_requested = false;
+	//! Keeps the originating context alive after it votes to commit. Guarded by the transaction manager lock.
+	shared_ptr<ClientContext> shared_context;
 	//! Set once the transaction is exported. It stays set for the transaction's lifetime.
 	atomic<bool> is_shared {false};
 

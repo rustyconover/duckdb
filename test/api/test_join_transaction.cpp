@@ -141,14 +141,52 @@ TEST_CASE("Shared transaction ids are stable and preserve catalog names", "[api]
 	REQUIRE_NO_FAIL(owner.Query("CREATE TABLE \"catalog/with/slash\".main.values_table (value INTEGER)"));
 	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
 	REQUIRE_NO_FAIL(owner.Query("INSERT INTO \"catalog/with/slash\".main.values_table VALUES (7)"));
-	auto transaction_id = ShareTransaction(owner);
+	auto result = owner.Query("SELECT duckdb_share_transaction('catalog/with/slash')");
+	REQUIRE_NO_FAIL(*result);
+	auto transaction_id = result->GetValue(0, 0).GetValue<string>();
 	REQUIRE(ShareTransaction(owner) == transaction_id);
 	JoinTransaction(joiner, transaction_id);
+	REQUIRE(ShareTransaction(joiner) == transaction_id);
 
-	auto result = joiner.Query("SELECT value FROM \"catalog/with/slash\".main.values_table");
+	result = joiner.Query("SELECT value FROM \"catalog/with/slash\".main.values_table");
 	REQUIRE(CHECK_COLUMN(result, 0, {7}));
 	REQUIRE_NO_FAIL(owner.Query("COMMIT"));
 	REQUIRE_NO_FAIL(joiner.Query("COMMIT"));
+}
+
+TEST_CASE("Shared transactions use an explicit database boundary", "[api][join_transaction]") {
+	DuckDB database(nullptr);
+	Connection setup(database);
+	REQUIRE_NO_FAIL(setup.Query("ATTACH ':memory:' AS database_a"));
+	REQUIRE_NO_FAIL(setup.Query("ATTACH ':memory:' AS database_b"));
+	REQUIRE_NO_FAIL(setup.Query("CREATE TABLE database_a.main.values_table (value INTEGER)"));
+	REQUIRE_NO_FAIL(setup.Query("CREATE TABLE database_b.main.values_table (value INTEGER)"));
+
+	Connection owner(database);
+	Connection joiner(database);
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	REQUIRE_NO_FAIL(owner.Query("SELECT * FROM database_a.main.values_table"));
+	REQUIRE_NO_FAIL(owner.Query("SELECT * FROM database_b.main.values_table"));
+	auto result = owner.Query("SELECT duckdb_share_transaction('database_a')");
+	REQUIRE_NO_FAIL(*result);
+	auto transaction_id = result->GetValue(0, 0).GetValue<string>();
+	JoinTransaction(joiner, transaction_id);
+	REQUIRE_NO_FAIL(joiner.Query("INSERT INTO database_a.main.values_table VALUES (42)"));
+	REQUIRE_FAIL(joiner.Query("INSERT INTO database_b.main.values_table VALUES (84)"));
+	REQUIRE_NO_FAIL(joiner.Query("ROLLBACK"));
+	REQUIRE_FAIL(owner.Query("COMMIT"));
+
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	REQUIRE_NO_FAIL(owner.Query("INSERT INTO database_b.main.values_table VALUES (84)"));
+	REQUIRE_FAIL(owner.Query("SELECT duckdb_share_transaction('database_a')"));
+	REQUIRE_NO_FAIL(owner.Query("ROLLBACK"));
+
+	Connection ambiguous(database);
+	REQUIRE_NO_FAIL(ambiguous.Query("BEGIN"));
+	REQUIRE_NO_FAIL(ambiguous.Query("SELECT * FROM database_a.main.values_table"));
+	REQUIRE_NO_FAIL(ambiguous.Query("SELECT * FROM database_b.main.values_table"));
+	REQUIRE_FAIL(ambiguous.Query("SELECT duckdb_share_transaction()"));
+	REQUIRE_NO_FAIL(ambiguous.Query("ROLLBACK"));
 }
 
 TEST_CASE("Sharing occurs when the function executes", "[api][join_transaction]") {
@@ -157,13 +195,14 @@ TEST_CASE("Sharing occurs when the function executes", "[api][join_transaction]"
 	Connection joiner(database);
 
 	// Binding and explaining the function must not require or export a transaction.
-	auto prepared = owner.Prepare("SELECT duckdb_share_transaction()");
+	auto prepared = owner.Prepare("SELECT duckdb_share_transaction() FROM range(4097)");
 	REQUIRE(!prepared->HasError());
 	REQUIRE_NO_FAIL(owner.Query("EXPLAIN SELECT duckdb_share_transaction()"));
 
 	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
 	auto result = prepared->Execute();
 	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetResultType() == QueryResultType::MATERIALIZED_RESULT);
 	auto chunk = result->Fetch();
 	REQUIRE(chunk);
 	auto first_id = chunk->GetValue(0, 0).GetValue<string>();
@@ -242,7 +281,7 @@ TEST_CASE("JOIN TRANSACTION validates its context and id", "[api][join_transacti
 	REQUIRE_NO_FAIL(connection.Query("ROLLBACK"));
 }
 
-TEST_CASE("Shared transactions use stable lock ordering across databases", "[api][join_transaction]") {
+TEST_CASE("A meta transaction can only participate in one shared database", "[api][join_transaction]") {
 	DuckDB database(nullptr);
 	Connection setup(database);
 	REQUIRE_NO_FAIL(setup.Query("ATTACH ':memory:' AS database_a"));
@@ -262,30 +301,28 @@ TEST_CASE("Shared transactions use stable lock ordering across databases", "[api
 
 	Connection joiner_a(database);
 	JoinTransaction(joiner_a, transaction_a);
-	REQUIRE_NO_FAIL(joiner_a.Query("JOIN TRANSACTION '" + transaction_b + "'"));
-	Connection joiner_b(database);
-	JoinTransaction(joiner_b, transaction_b);
-	REQUIRE_NO_FAIL(joiner_b.Query("JOIN TRANSACTION '" + transaction_a + "'"));
-
-	atomic<bool> success {true};
-	auto query_both = [&success](Connection &connection) {
-		for (idx_t i = 0; i < 20; i++) {
-			auto result = connection.Query("SELECT (SELECT count(*) FROM database_a.main.values_table) + "
-			                               "(SELECT count(*) FROM database_b.main.values_table)");
-			if (result->HasError() || result->GetValue(0, 0).GetValue<int64_t>() != 2) {
-				success = false;
-				return;
-			}
-		}
-	};
-	std::thread thread_a(query_both, std::ref(joiner_a));
-	std::thread thread_b(query_both, std::ref(joiner_b));
-	thread_a.join();
-	thread_b.join();
-	REQUIRE(success);
-
-	REQUIRE_NO_FAIL(joiner_a.Query("COMMIT"));
-	REQUIRE_NO_FAIL(joiner_b.Query("COMMIT"));
-	REQUIRE_NO_FAIL(owner_a.Query("COMMIT"));
+	REQUIRE_FAIL(joiner_a.Query("JOIN TRANSACTION '" + transaction_b + "'"));
+	REQUIRE_NO_FAIL(joiner_a.Query("ROLLBACK"));
+	REQUIRE_FAIL(owner_a.Query("COMMIT"));
 	REQUIRE_NO_FAIL(owner_b.Query("COMMIT"));
+}
+
+TEST_CASE("A shared transaction outlives its originating connection", "[api][join_transaction]") {
+	DuckDB database(nullptr);
+	Connection setup(database);
+	Connection joiner(database);
+	REQUIRE_NO_FAIL(setup.Query("CREATE TABLE shared_values (value INTEGER)"));
+
+	{
+		Connection owner(database);
+		REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+		REQUIRE_NO_FAIL(owner.Query("INSERT INTO shared_values VALUES (1)"));
+		JoinTransaction(joiner, ShareTransaction(owner));
+		REQUIRE_NO_FAIL(owner.Query("COMMIT"));
+	}
+
+	REQUIRE_NO_FAIL(joiner.Query("INSERT INTO shared_values VALUES (2)"));
+	REQUIRE_NO_FAIL(joiner.Query("COMMIT"));
+	auto result = setup.Query("SELECT value FROM shared_values ORDER BY value");
+	REQUIRE(CHECK_COLUMN(result, 0, {1, 2}));
 }
