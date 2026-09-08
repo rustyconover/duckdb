@@ -108,9 +108,10 @@ public:
 	}
 
 	bool IsShared() const {
-		return is_shared.load();
+		return statement_lock != nullptr;
 	}
 	shared_ptr<mutex> GetStatementLock() const {
+		D_ASSERT(statement_lock);
 		return statement_lock;
 	}
 
@@ -125,9 +126,6 @@ private:
 	bool rollback_requested = false;
 	//! Keeps the originating context alive after it votes to commit. Guarded by the transaction manager lock.
 	shared_ptr<ClientContext> shared_context;
-	//! Set once the transaction is exported. It stays set for the transaction's lifetime.
-	atomic<bool> is_shared {false};
-
 	//! The undo buffer is used to store old versions of rows that are updated
 	//! or deleted
 	UndoBuffer undo_buffer;
@@ -151,7 +149,7 @@ private:
 	reference_map_t<DataTableInfo, unique_ptr<ActiveTableLock>> active_locks;
 	//! Flag to prevent auto-checkpointing inside a checkpoint transaction.
 	bool is_checkpoint_transaction = false;
-	//! Shared so statement guards can safely outlive the transaction object.
+	//! Allocated when the transaction is first shared.
 	shared_ptr<mutex> statement_lock;
 };
 

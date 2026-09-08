@@ -23,7 +23,7 @@ struct UndoBufferProperties;
 struct DuckCleanupInfo {
 	//! All transactions in a cleanup info share the same lowest_visibility_bound.
 	VisibilityBound lowest_visibility_bound;
-	vector<shared_ptr<DuckTransaction>> transactions;
+	vector<unique_ptr<DuckTransaction>> transactions;
 
 	void Cleanup();
 	bool ScheduleCleanup() noexcept;
@@ -42,9 +42,9 @@ public:
 	//! Start a new transaction
 	Transaction &StartTransaction(ClientContext &context) override;
 	//! Export an active transaction and return its capability.
-	string ShareTransaction(DuckTransaction &transaction, shared_ptr<DuckTransaction> &handle);
+	string ShareTransaction(DuckTransaction &transaction);
 	//! Import an explicitly shared transaction and register a new participant.
-	shared_ptr<DuckTransaction> JoinTransaction(const string &token);
+	DuckTransaction &JoinTransaction(const string &token);
 	//! Commit the given transaction
 	ErrorData CommitTransaction(ClientContext &context, Transaction &transaction) override;
 	//! Rollback the given transaction
@@ -149,11 +149,11 @@ private:
 	//! Source of checkpoint identities
 	atomic<idx_t> next_checkpoint_id = {0};
 	//! Set of currently running transactions
-	vector<shared_ptr<DuckTransaction>> active_transactions;
+	vector<unique_ptr<DuckTransaction>> active_transactions;
 	//! Set of recently committed transactions
-	vector<shared_ptr<DuckTransaction>> recently_committed_transactions;
-	//! Capability lookup for explicitly shared transactions.
-	unordered_map<string, shared_ptr<DuckTransaction>> shared_transactions;
+	vector<unique_ptr<DuckTransaction>> recently_committed_transactions;
+	//! Capability lookup for explicitly shared transactions. active_transactions owns every entry.
+	unordered_map<string, reference<DuckTransaction>> shared_transactions;
 	//! The lock used for transaction operations
 	mutex transaction_lock;
 	//! The checkpoint lock

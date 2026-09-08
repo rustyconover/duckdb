@@ -97,48 +97,50 @@ Transaction &DuckTransactionManager::StartTransaction(ClientContext &context) {
 	}
 
 	// create the actual transaction
-	auto transaction = make_shared_ptr<DuckTransaction>(*this, context, start_time, view, last_committed_version);
+	auto transaction = make_uniq<DuckTransaction>(*this, context, start_time, view, last_committed_version);
+	auto &transaction_ref = *transaction;
 
 	// store it in the set of active transactions
-	active_transactions.push_back(transaction);
-	return *transaction;
+	active_transactions.push_back(std::move(transaction));
+	return transaction_ref;
 }
 
-string DuckTransactionManager::ShareTransaction(DuckTransaction &transaction, shared_ptr<DuckTransaction> &handle) {
+string DuckTransactionManager::ShareTransaction(DuckTransaction &transaction) {
 	lock_guard<mutex> lock(transaction_lock);
 	if (transaction.share_count > 0) {
-		handle = shared_transactions.at(transaction.share_token);
 		return transaction.share_token;
 	}
 	for (auto &active_transaction : active_transactions) {
 		if (!RefersToSameObject(*active_transaction, transaction)) {
 			continue;
 		}
+		string share_token;
 		do {
-			transaction.share_token = UUID::ToString(UUID::GenerateRandomUUID());
-		} while (shared_transactions.find(transaction.share_token) != shared_transactions.end());
-		auto shared_entry = shared_transactions.emplace(transaction.share_token, active_transaction);
+			share_token = UUID::ToString(UUID::GenerateRandomUUID());
+		} while (shared_transactions.find(share_token) != shared_transactions.end());
+		auto statement_lock = make_shared_ptr<mutex>();
+		auto shared_entry = shared_transactions.emplace(share_token, transaction);
 		D_ASSERT(shared_entry.second);
+		transaction.share_token = std::move(share_token);
+		transaction.statement_lock = std::move(statement_lock);
 		transaction.share_count = 1;
-		transaction.is_shared = true;
-		handle = shared_entry.first->second;
 		return transaction.share_token;
 	}
 	throw TransactionException("Cannot share a transaction that is no longer active");
 }
 
-shared_ptr<DuckTransaction> DuckTransactionManager::JoinTransaction(const string &token) {
+DuckTransaction &DuckTransactionManager::JoinTransaction(const string &token) {
 	lock_guard<mutex> lock(transaction_lock);
 	auto entry = shared_transactions.find(token);
 	if (entry == shared_transactions.end()) {
 		throw TransactionException("Shared transaction is no longer available");
 	}
-	auto &transaction = *entry->second;
+	auto &transaction = entry->second.get();
 	if (transaction.share_count == NumericLimits<idx_t>::Maximum()) {
 		throw TransactionException("Shared transaction has too many participants");
 	}
 	transaction.share_count++;
-	return entry->second;
+	return transaction;
 }
 
 void DuckTransactionManager::SetActiveCheckpoint(idx_t checkpoint_id) {
@@ -336,13 +338,11 @@ void DuckTransactionManager::CleanupTransactions() {
 
 ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction_p) {
 	auto &transaction = transaction_p.Cast<DuckTransaction>();
-	bool was_shared = false;
 	bool rollback_requested = false;
 	ErrorData error;
 	{
 		lock_guard<mutex> lock(transaction_lock);
 		if (transaction.share_count > 0) {
-			was_shared = true;
 			transaction.share_count--;
 			rollback_requested = transaction.rollback_requested;
 			if (rollback_requested) {
@@ -361,14 +361,9 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	}
 	if (rollback_requested) {
 		RollbackTransactionInternal(transaction);
-		transaction.shared_context.reset();
 		return error;
 	}
-	auto result = CommitTransactionInternal(context, transaction);
-	if (was_shared) {
-		transaction.shared_context.reset();
-	}
-	return result;
+	return CommitTransactionInternal(context, transaction);
 }
 
 ErrorData DuckTransactionManager::CommitTransactionInternal(ClientContext &context, DuckTransaction &transaction) {
@@ -500,6 +495,7 @@ ErrorData DuckTransactionManager::CommitTransactionInternal(ClientContext &conte
 	bool store_transaction = undo_properties.has_updates || undo_properties.has_index_deletes ||
 	                         undo_properties.has_catalog_changes || error.HasError();
 
+	transaction.shared_context.reset();
 	// Remove the transaction from the list of active transactions and gather cleanup information.
 	QueueCleanup(RemoveTransaction(transaction, store_transaction, CreateCleanupInfo()));
 
@@ -543,11 +539,9 @@ ErrorData DuckTransactionManager::CommitTransactionInternal(ClientContext &conte
 
 void DuckTransactionManager::RollbackTransaction(Transaction &transaction_p) {
 	auto &transaction = transaction_p.Cast<DuckTransaction>();
-	bool was_shared = false;
 	{
 		lock_guard<mutex> lock(transaction_lock);
 		if (transaction.share_count > 0) {
-			was_shared = true;
 			transaction.rollback_requested = true;
 			transaction.share_count--;
 			if (transaction.share_count > 0) {
@@ -557,9 +551,6 @@ void DuckTransactionManager::RollbackTransaction(Transaction &transaction_p) {
 		}
 	}
 	RollbackTransactionInternal(transaction);
-	if (was_shared) {
-		transaction.shared_context.reset();
-	}
 }
 
 void DuckTransactionManager::RollbackTransactionInternal(DuckTransaction &transaction) {
@@ -571,6 +562,7 @@ void DuckTransactionManager::RollbackTransactionInternal(DuckTransaction &transa
 		lock_guard<mutex> t_lock(transaction_lock);
 		error = transaction.Rollback();
 
+		transaction.shared_context.reset();
 		// Remove the transaction from the list of active transactions and gather cleanup information.
 		QueueCleanup(RemoveTransaction(transaction, CreateCleanupInfo()));
 	}
@@ -586,7 +578,7 @@ void DuckTransactionManager::RemoveSharedTransaction(DuckTransaction &transactio
 	D_ASSERT(transaction.share_count == 0);
 	auto entry = shared_transactions.find(transaction.share_token);
 	D_ASSERT(entry != shared_transactions.end());
-	D_ASSERT(RefersToSameObject(*entry->second, transaction));
+	D_ASSERT(RefersToSameObject(entry->second.get(), transaction));
 	shared_transactions.erase(entry);
 }
 

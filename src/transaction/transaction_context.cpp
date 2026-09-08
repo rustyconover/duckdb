@@ -168,13 +168,13 @@ void TransactionContext::JoinTransaction(const string &transaction_id) {
 		throw TransactionException("Database '%s' does not support shared transactions", database_name);
 	}
 	auto &duck_manager = transaction_manager.Cast<DuckTransactionManager>();
-	auto transaction = duck_manager.JoinTransaction(token);
+	auto &transaction = duck_manager.JoinTransaction(token);
 	try {
 		current_transaction->Adopt(*database, transaction);
 	} catch (...) {
 		// Release the participant registered by JoinTransaction.
 		try {
-			(void)duck_manager.CommitTransaction(context, *transaction);
+			(void)duck_manager.CommitTransaction(context, transaction);
 		} catch (...) { // NOLINT
 		}
 		throw;

@@ -106,9 +106,8 @@ unique_ptr<FunctionLocalState> ShareTransactionInit(ExpressionState &state, cons
 		throw TransactionException("Database '%s' does not support shared transactions", database->GetName());
 	}
 	auto &duck_transaction = transaction.Cast<DuckTransaction>();
-	shared_ptr<DuckTransaction> handle;
-	auto token = duck_transaction.GetTransactionManager().ShareTransaction(duck_transaction, handle);
-	meta_transaction.SetSharedTransaction(*database, std::move(handle));
+	auto token = duck_transaction.GetTransactionManager().ShareTransaction(duck_transaction);
+	meta_transaction.SetSharedTransaction(*database, duck_transaction);
 	auto transaction_id = StringUtil::Format("%s/%s", token, database->GetName().GetIdentifierName());
 	return make_uniq<ShareTransactionLocalState>(std::move(transaction_id));
 }

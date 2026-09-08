@@ -32,11 +32,9 @@ struct TransactionReference {
 	explicit TransactionReference(Transaction &transaction_p)
 	    : state(TransactionState::UNCOMMITTED), transaction(transaction_p) {
 	}
-	explicit TransactionReference(shared_ptr<DuckTransaction> transaction_p);
 
 	TransactionState state;
 	Transaction &transaction;
-	shared_ptr<DuckTransaction> participation;
 };
 
 //! The MetaTransaction manages multiple transactions for different attached databases
@@ -66,8 +64,8 @@ public:
 	optional_ptr<Transaction> TryGetTransaction(AttachedDatabase &db);
 	void RemoveTransaction(AttachedDatabase &db);
 	void ValidateSharedTransaction(AttachedDatabase &db);
-	void SetSharedTransaction(AttachedDatabase &db, shared_ptr<DuckTransaction> transaction);
-	void Adopt(AttachedDatabase &db, shared_ptr<DuckTransaction> transaction);
+	void SetSharedTransaction(AttachedDatabase &db, DuckTransaction &transaction);
+	void Adopt(AttachedDatabase &db, DuckTransaction &transaction);
 
 	ErrorData Commit();
 	void Rollback();
@@ -85,6 +83,9 @@ public:
 	}
 	optional_ptr<AttachedDatabase> SharedDatabase() {
 		return shared_database;
+	}
+	optional_ptr<DuckTransaction> SharedTransaction() {
+		return shared_transaction;
 	}
 	const vector<reference<AttachedDatabase>> &OpenedTransactions() const {
 		return all_transactions;
@@ -107,6 +108,8 @@ private:
 	optional_ptr<AttachedDatabase> modified_database;
 	//! The database whose transaction is shared. Only this database may be modified.
 	optional_ptr<AttachedDatabase> shared_database;
+	//! The shared database transaction, when this connection participates in one.
+	optional_ptr<DuckTransaction> shared_transaction;
 	//! Whether the meta transaction is marked as read only.
 	bool is_read_only;
 	//! Lock for referenced_databases.

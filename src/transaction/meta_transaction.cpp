@@ -11,10 +11,6 @@
 
 namespace duckdb {
 
-TransactionReference::TransactionReference(shared_ptr<DuckTransaction> transaction_p)
-    : state(TransactionState::UNCOMMITTED), transaction(*transaction_p), participation(std::move(transaction_p)) {
-}
-
 MetaTransaction::MetaTransaction(ClientContext &context_p, timestamp_t start_timestamp_p,
                                  transaction_t transaction_id_p)
     : context(context_p), start_timestamp(start_timestamp_p), global_transaction_id(transaction_id_p),
@@ -123,14 +119,15 @@ Transaction &Transaction::Get(ClientContext &context, Catalog &catalog) {
 	return Transaction::Get(context, catalog.GetAttached());
 }
 
-void MetaTransaction::SetSharedTransaction(AttachedDatabase &db, shared_ptr<DuckTransaction> transaction) {
+void MetaTransaction::SetSharedTransaction(AttachedDatabase &db, DuckTransaction &transaction) {
 	lock_guard<mutex> guard(lock);
 	auto entry = transactions.find(db);
 	D_ASSERT(entry != transactions.end());
-	D_ASSERT(RefersToSameObject(entry->second.transaction, *transaction));
+	D_ASSERT(RefersToSameObject(entry->second.transaction, transaction));
+	D_ASSERT(transaction.IsShared());
 	D_ASSERT(!shared_database || RefersToSameObject(*shared_database, db));
 	shared_database = &db;
-	entry->second.participation = std::move(transaction);
+	shared_transaction = &transaction;
 }
 
 void MetaTransaction::ValidateSharedTransaction(AttachedDatabase &db) {
@@ -145,8 +142,8 @@ void MetaTransaction::ValidateSharedTransaction(AttachedDatabase &db) {
 	}
 }
 
-void MetaTransaction::Adopt(AttachedDatabase &db, shared_ptr<DuckTransaction> transaction) {
-	D_ASSERT(transaction);
+void MetaTransaction::Adopt(AttachedDatabase &db, DuckTransaction &transaction) {
+	D_ASSERT(transaction.IsShared());
 	lock_guard<mutex> guard(lock);
 	if (shared_database && !RefersToSameObject(*shared_database, db)) {
 		throw TransactionException("Cannot participate in shared transactions for multiple databases");
@@ -159,7 +156,7 @@ void MetaTransaction::Adopt(AttachedDatabase &db, shared_ptr<DuckTransaction> tr
 	auto entry = transactions.find(db);
 	if (entry != transactions.end()) {
 		auto &current = entry->second.transaction;
-		if (RefersToSameObject(current, *transaction)) {
+		if (RefersToSameObject(current, transaction)) {
 			throw TransactionException("This connection already participates in the shared transaction");
 		}
 		if (!current.IsDuckTransaction() || current.Cast<DuckTransaction>().IsShared() ||
@@ -170,8 +167,9 @@ void MetaTransaction::Adopt(AttachedDatabase &db, shared_ptr<DuckTransaction> tr
 		}
 		db.GetTransactionManager().RollbackTransaction(current);
 		transactions.erase(entry);
-		transactions.insert({reference<AttachedDatabase>(db), TransactionReference(std::move(transaction))});
+		transactions.insert({reference<AttachedDatabase>(db), TransactionReference(transaction)});
 		shared_database = &db;
+		shared_transaction = &transaction;
 		return;
 	}
 #ifdef DEBUG
@@ -180,9 +178,10 @@ void MetaTransaction::Adopt(AttachedDatabase &db, shared_ptr<DuckTransaction> tr
 	auto shared_db = db.shared_from_this();
 	UseDatabase(shared_db);
 	all_transactions.reserve(all_transactions.size() + 1);
-	transactions.insert({reference<AttachedDatabase>(db), TransactionReference(std::move(transaction))});
+	transactions.insert({reference<AttachedDatabase>(db), TransactionReference(transaction)});
 	all_transactions.push_back(db);
 	shared_database = &db;
+	shared_transaction = &transaction;
 }
 
 ErrorData MetaTransaction::Commit() {
