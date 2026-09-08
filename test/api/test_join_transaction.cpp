@@ -1,7 +1,12 @@
 #include "catch.hpp"
+#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/function/scalar_function.hpp"
 #include "duckdb/main/connection.hpp"
+#include "duckdb/main/stream_query_result.hpp"
+#include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "test_helpers.hpp"
 
+#include <condition_variable>
 #include <thread>
 
 using namespace duckdb;
@@ -15,6 +20,45 @@ static string ShareTransaction(Connection &connection) {
 static void JoinTransaction(Connection &connection, const string &transaction_id) {
 	REQUIRE_NO_FAIL(connection.Query("BEGIN"));
 	REQUIRE_NO_FAIL(connection.Query("JOIN TRANSACTION '" + transaction_id + "'"));
+}
+
+struct SharedTransactionHookState : ClientContextState {
+	idx_t commits = 0;
+	idx_t rollbacks = 0;
+
+	void TransactionCommit(MetaTransaction &, ClientContext &) override {
+		commits++;
+	}
+	void TransactionRollback(MetaTransaction &, ClientContext &) override {
+		rollbacks++;
+	}
+};
+
+struct CaptureTransactionState {
+	mutex lock;
+	std::condition_variable signal;
+	string token;
+	bool captured = false;
+	bool release = false;
+};
+
+static void RegisterCaptureTransactionFunction(Connection &connection,
+                                               const shared_ptr<CaptureTransactionState> &capture) {
+	ScalarFunction function("capture_shared_transaction", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
+	                        [capture](DataChunk &input, ExpressionState &, Vector &result) {
+		                        auto token = input.GetValue(0, 0).GetValue<string>();
+		                        {
+			                        unique_lock<mutex> guard(capture->lock);
+			                        capture->token = token;
+			                        capture->captured = true;
+			                        capture->signal.notify_all();
+			                        capture->signal.wait(guard, [&]() { return capture->release; });
+		                        }
+		                        result.Reference(Value(token), count_t(input.size()));
+	                        });
+	CreateScalarFunctionInfo info(function);
+	connection.context->RunFunctionInTransaction(
+	    [&]() { Catalog::GetSystemCatalog(*connection.context).CreateFunction(*connection.context, info); });
 }
 
 TEST_CASE("Transactions can be shared between connections", "[api][join_transaction]") {
@@ -327,6 +371,42 @@ TEST_CASE("A shared transaction outlives its originating connection", "[api][joi
 	REQUIRE(CHECK_COLUMN(result, 0, {1, 2}));
 }
 
+TEST_CASE("Closing the exporter preserves its context during a joiner statement", "[api][join_transaction]") {
+	DuckDB database(nullptr);
+	Connection setup(database);
+	Connection joiner(database);
+	auto capture = make_shared_ptr<CaptureTransactionState>();
+	RegisterCaptureTransactionFunction(setup, capture);
+	REQUIRE_NO_FAIL(setup.Query("CREATE TABLE shared_values (value INTEGER)"));
+	REQUIRE_NO_FAIL(setup.Query("INSERT INTO shared_values VALUES (1)"));
+
+	auto owner = make_uniq<Connection>(database);
+	REQUIRE_NO_FAIL(owner->Query("BEGIN"));
+	JoinTransaction(joiner, ShareTransaction(*owner));
+	unique_ptr<QueryResult> joiner_result;
+	std::thread joiner_thread([&]() {
+		joiner_result = joiner.Query("SELECT capture_shared_transaction(CAST(value AS VARCHAR)) FROM shared_values");
+	});
+	{
+		unique_lock<mutex> guard(capture->lock);
+		REQUIRE(capture->signal.wait_for(guard, std::chrono::seconds(2), [&]() { return capture->captured; }));
+	}
+
+	// Closing the exporter requests rollback, but its context remains alive until the joiner leaves the statement.
+	owner.reset();
+	{
+		lock_guard<mutex> guard(capture->lock);
+		capture->release = true;
+		capture->signal.notify_all();
+	}
+	joiner_thread.join();
+	REQUIRE_NO_FAIL(*joiner_result);
+	REQUIRE_FAIL(joiner.Query("SELECT 42"));
+	REQUIRE_FAIL(joiner.Query("COMMIT"));
+	auto result = setup.Query("SELECT value FROM shared_values");
+	REQUIRE(CHECK_COLUMN(result, 0, {1}));
+}
+
 TEST_CASE("Closing an exporter rolls back its later transaction", "[api][join_transaction]") {
 	DuckDB database(nullptr);
 	Connection setup(database);
@@ -353,4 +433,232 @@ TEST_CASE("Closing an exporter rolls back its later transaction", "[api][join_tr
 	REQUIRE(CHECK_COLUMN(result, 0, {1}));
 	result = setup.Query("SELECT value FROM private_values");
 	REQUIRE(CHECK_COLUMN(result, 0, {2}));
+}
+
+TEST_CASE("An explicitly read-only transaction remains read-only after JOIN", "[api][join_transaction]") {
+	DuckDB database(nullptr);
+	Connection setup(database);
+	Connection owner(database);
+	Connection joiner(database);
+	REQUIRE_NO_FAIL(setup.Query("CREATE TABLE shared_values (value INTEGER)"));
+	REQUIRE_NO_FAIL(owner.Query("BEGIN TRANSACTION READ ONLY"));
+	auto transaction_id = ShareTransaction(owner);
+	JoinTransaction(joiner, transaction_id);
+	REQUIRE_FAIL(joiner.Query("INSERT INTO shared_values VALUES (1)"));
+	REQUIRE_NO_FAIL(joiner.Query("ROLLBACK"));
+	REQUIRE_FAIL(owner.Query("COMMIT"));
+	auto result = setup.Query("SELECT count(*) FROM shared_values");
+	REQUIRE(CHECK_COLUMN(result, 0, {0}));
+}
+
+TEST_CASE("Doomed shared transactions reject joins and statements", "[api][join_transaction]") {
+	DuckDB database(nullptr);
+	Connection setup(database);
+	Connection owner(database);
+	Connection peer(database);
+	Connection late_joiner(database);
+	REQUIRE_NO_FAIL(setup.Query("CREATE TABLE shared_values (value INTEGER)"));
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	auto transaction_id = ShareTransaction(owner);
+	JoinTransaction(peer, transaction_id);
+	REQUIRE_NO_FAIL(peer.Query("ROLLBACK"));
+	REQUIRE_FAIL(late_joiner.Query("BEGIN; JOIN TRANSACTION '" + transaction_id + "'"));
+	REQUIRE_FAIL(owner.Query("INSERT INTO shared_values VALUES (1)"));
+	REQUIRE_FAIL(owner.Query("COMMIT"));
+	auto result = setup.Query("SELECT count(*) FROM shared_values");
+	REQUIRE(CHECK_COLUMN(result, 0, {0}));
+}
+
+TEST_CASE("JOIN rejects an invalidated local transaction without affecting the exporter", "[api][join_transaction]") {
+	DuckDB database(nullptr);
+	Connection setup(database);
+	Connection owner(database);
+	Connection joiner(database);
+	REQUIRE_NO_FAIL(setup.Query("CREATE TABLE shared_values (value INTEGER)"));
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	REQUIRE_NO_FAIL(owner.Query("INSERT INTO shared_values VALUES (1)"));
+	auto transaction_id = ShareTransaction(owner);
+	REQUIRE_NO_FAIL(joiner.Query("BEGIN"));
+	REQUIRE_FAIL(joiner.Query("SELECT CAST('not an integer' AS INTEGER)"));
+	REQUIRE_FAIL(joiner.Query("JOIN TRANSACTION '" + transaction_id + "'"));
+	REQUIRE_NO_FAIL(joiner.Query("ROLLBACK"));
+	REQUIRE_NO_FAIL(owner.Query("COMMIT"));
+	auto result = setup.Query("SELECT value FROM shared_values");
+	REQUIRE(CHECK_COLUMN(result, 0, {1}));
+}
+
+TEST_CASE("JOIN validates local state before registering a participant", "[api][join_transaction]") {
+	DuckDB database(nullptr);
+	Connection setup(database);
+	Connection owner(database);
+	Connection joiner(database);
+	REQUIRE_NO_FAIL(setup.Query("CREATE TABLE shared_values (value INTEGER)"));
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	REQUIRE_NO_FAIL(owner.Query("INSERT INTO shared_values VALUES (1)"));
+	auto transaction_id = ShareTransaction(owner);
+	REQUIRE_NO_FAIL(joiner.Query("BEGIN"));
+	REQUIRE_NO_FAIL(joiner.Query("INSERT INTO shared_values VALUES (2)"));
+	REQUIRE_FAIL(joiner.Query("JOIN TRANSACTION '" + transaction_id + "'"));
+	REQUIRE_NO_FAIL(owner.Query("COMMIT"));
+	REQUIRE_NO_FAIL(joiner.Query("ROLLBACK"));
+	auto result = setup.Query("SELECT value FROM shared_values");
+	REQUIRE(CHECK_COLUMN(result, 0, {1}));
+}
+
+TEST_CASE("Shared transaction capabilities survive database aliases", "[api][join_transaction]") {
+	DuckDB database(nullptr);
+	Connection setup(database);
+	Connection owner(database);
+	Connection joiner(database);
+	REQUIRE_NO_FAIL(setup.Query("ATTACH ':memory:' AS original_name"));
+	REQUIRE_NO_FAIL(setup.Query("CREATE TABLE original_name.main.shared_values (value INTEGER)"));
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	REQUIRE_NO_FAIL(owner.Query("INSERT INTO original_name.main.shared_values VALUES (1)"));
+	auto result = owner.Query("SELECT duckdb_share_transaction('original_name')");
+	REQUIRE_NO_FAIL(*result);
+	auto transaction_id = result->GetValue(0, 0).GetValue<string>();
+	REQUIRE_NO_FAIL(setup.Query("ALTER DATABASE original_name SET ALIAS TO renamed_database"));
+	JoinTransaction(joiner, transaction_id);
+	REQUIRE_NO_FAIL(joiner.Query("INSERT INTO renamed_database.main.shared_values VALUES (2)"));
+	REQUIRE_NO_FAIL(owner.Query("COMMIT"));
+	REQUIRE_NO_FAIL(joiner.Query("COMMIT"));
+	result = setup.Query("SELECT value FROM renamed_database.main.shared_values ORDER BY value");
+	REQUIRE(CHECK_COLUMN(result, 0, {1, 2}));
+}
+
+TEST_CASE("Shared transaction capabilities remain bound across detach and reattach", "[api][join_transaction]") {
+	DuckDB database(nullptr);
+	Connection setup(database);
+	Connection owner(database);
+	Connection joiner(database);
+	REQUIRE_NO_FAIL(setup.Query("ATTACH ':memory:' AS shared_database"));
+	REQUIRE_NO_FAIL(setup.Query("CREATE TABLE shared_database.main.shared_values (value INTEGER)"));
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	REQUIRE_NO_FAIL(owner.Query("INSERT INTO shared_database.main.shared_values VALUES (1)"));
+	auto result = owner.Query("SELECT duckdb_share_transaction('shared_database')");
+	REQUIRE_NO_FAIL(*result);
+	auto transaction_id = result->GetValue(0, 0).GetValue<string>();
+	REQUIRE_NO_FAIL(setup.Query("DETACH shared_database"));
+	REQUIRE_NO_FAIL(setup.Query("ATTACH ':memory:' AS shared_database"));
+	REQUIRE_NO_FAIL(setup.Query("CREATE TABLE shared_database.main.shared_values (value INTEGER)"));
+	JoinTransaction(joiner, transaction_id);
+	REQUIRE_NO_FAIL(owner.Query("COMMIT"));
+	REQUIRE_NO_FAIL(joiner.Query("COMMIT"));
+	result = setup.Query("SELECT count(*) FROM shared_database.main.shared_values");
+	REQUIRE(CHECK_COLUMN(result, 0, {0}));
+}
+
+TEST_CASE("The exporting statement owns the shared statement lock before publishing", "[api][join_transaction]") {
+	DuckDB database(nullptr);
+	Connection owner(database);
+	Connection joiner(database);
+	auto capture = make_shared_ptr<CaptureTransactionState>();
+	RegisterCaptureTransactionFunction(owner, capture);
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	REQUIRE_NO_FAIL(joiner.Query("BEGIN"));
+	unique_ptr<QueryResult> owner_result;
+	std::thread owner_thread(
+	    [&]() { owner_result = owner.Query("SELECT capture_shared_transaction(duckdb_share_transaction())"); });
+	{
+		unique_lock<mutex> guard(capture->lock);
+		REQUIRE(capture->signal.wait_for(guard, std::chrono::seconds(2), [&]() { return capture->captured; }));
+	}
+	atomic<bool> join_finished {false};
+	unique_ptr<QueryResult> join_result;
+	std::thread join_thread([&]() {
+		join_result = joiner.Query("JOIN TRANSACTION '" + capture->token + "'");
+		join_finished = true;
+	});
+	{
+		unique_lock<mutex> guard(capture->lock);
+		REQUIRE(
+		    !capture->signal.wait_for(guard, std::chrono::milliseconds(50), [&]() { return join_finished.load(); }));
+		capture->release = true;
+		capture->signal.notify_all();
+	}
+	owner_thread.join();
+	join_thread.join();
+	REQUIRE_NO_FAIL(*owner_result);
+	REQUIRE_NO_FAIL(*join_result);
+	REQUIRE_NO_FAIL(owner.Query("COMMIT"));
+	REQUIRE_NO_FAIL(joiner.Query("COMMIT"));
+}
+
+TEST_CASE("Waiting for a shared statement lock is interruptible", "[api][join_transaction]") {
+	DuckDB database(nullptr);
+	Connection owner(database);
+	Connection joiner(database);
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	JoinTransaction(joiner, ShareTransaction(owner));
+	auto stream = owner.SendQuery("SELECT i FROM range(10000000) t(i)");
+	REQUIRE(stream->GetResultType() == QueryResultType::STREAM_RESULT);
+	atomic<bool> query_finished {false};
+	unique_ptr<QueryResult> blocked_result;
+	std::thread blocked_thread([&]() {
+		blocked_result = joiner.Query("SELECT 42");
+		query_finished = true;
+	});
+	for (idx_t i = 0; i < 100 && !query_finished.load(); i++) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	REQUIRE(!query_finished.load());
+	joiner.Interrupt();
+	blocked_thread.join();
+	REQUIRE_FAIL(blocked_result);
+	stream->Cast<StreamQueryResult>().Close();
+	stream.reset();
+	REQUIRE_NO_FAIL(joiner.Query("ROLLBACK"));
+	REQUIRE_FAIL(owner.Query("COMMIT"));
+}
+
+TEST_CASE("Non-final commit hooks wait for the shared outcome", "[api][join_transaction]") {
+	DuckDB database(nullptr);
+	Connection owner(database);
+	Connection joiner(database);
+	auto hook_state = make_shared_ptr<SharedTransactionHookState>();
+	owner.context->registered_state->Insert("shared_transaction_hooks", hook_state);
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	JoinTransaction(joiner, ShareTransaction(owner));
+	REQUIRE_NO_FAIL(owner.Query("COMMIT"));
+	REQUIRE(hook_state->commits == 0);
+	REQUIRE(hook_state->rollbacks == 0);
+	REQUIRE_NO_FAIL(joiner.Query("ROLLBACK"));
+	owner.context->transaction.FinalizePendingTransactions();
+	REQUIRE(hook_state->commits == 0);
+	REQUIRE(hook_state->rollbacks == 1);
+}
+
+TEST_CASE("Non-final commit hooks receive the eventual commit", "[api][join_transaction]") {
+	DuckDB database(nullptr);
+	Connection owner(database);
+	Connection joiner(database);
+	auto hook_state = make_shared_ptr<SharedTransactionHookState>();
+	owner.context->registered_state->Insert("shared_transaction_hooks", hook_state);
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	JoinTransaction(joiner, ShareTransaction(owner));
+	REQUIRE_NO_FAIL(owner.Query("COMMIT"));
+	REQUIRE(hook_state->commits == 0);
+	REQUIRE_NO_FAIL(joiner.Query("COMMIT"));
+	owner.context->transaction.FinalizePendingTransactions();
+	REQUIRE(hook_state->commits == 1);
+	REQUIRE(hook_state->rollbacks == 0);
+}
+
+TEST_CASE("A later connection secret survives an earlier shared rollback", "[api][join_transaction]") {
+	DuckDB database(nullptr);
+	Connection owner(database);
+	Connection joiner(database);
+	REQUIRE_NO_FAIL(owner.Query("CREATE SECRET shared_secret IN connection (TYPE http, SCOPE 'http://original')"));
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	REQUIRE_NO_FAIL(
+	    owner.Query("CREATE OR REPLACE SECRET shared_secret IN connection (TYPE http, SCOPE 'http://shared')"));
+	JoinTransaction(joiner, ShareTransaction(owner));
+	REQUIRE_NO_FAIL(owner.Query("COMMIT"));
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	REQUIRE_NO_FAIL(
+	    owner.Query("CREATE OR REPLACE SECRET shared_secret IN connection (TYPE http, SCOPE 'http://later')"));
+	REQUIRE_NO_FAIL(owner.Query("COMMIT"));
+	REQUIRE_NO_FAIL(joiner.Query("ROLLBACK"));
+	auto result = owner.Query("SELECT scope[1] FROM duckdb_secrets() WHERE name = 'shared_secret'");
+	REQUIRE(CHECK_COLUMN(result, 0, {Value("http://later")}));
 }

@@ -19,6 +19,7 @@ namespace duckdb {
 
 class ClientContext;
 class MetaTransaction;
+struct SharedTransactionState;
 class Transaction;
 class TransactionManager;
 
@@ -46,6 +47,7 @@ public:
 	void ClearTransaction();
 	void SetAutocheckpointError(ErrorData error);
 	void JoinTransaction(const string &transaction_id);
+	void FinalizePendingTransactions();
 
 	void SetAutoCommit(bool value);
 	bool IsAutoCommit() const {
@@ -76,6 +78,11 @@ private:
 	bool auto_rollback = false;
 
 	unique_ptr<MetaTransaction> current_transaction;
+	struct PendingSharedTransaction {
+		unique_ptr<MetaTransaction> transaction;
+		shared_ptr<SharedTransactionState> state;
+	};
+	vector<PendingSharedTransaction> pending_transactions;
 	ErrorData autocheckpoint_error;
 
 	TransactionContext(const TransactionContext &) = delete;

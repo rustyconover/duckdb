@@ -98,13 +98,17 @@ public:
 	unique_ptr<ProgressBar> progress_bar;
 	//! Pins and holds a DuckTransaction's statement mutex for this query.
 	struct StatementGuard {
-		explicit StatementGuard(shared_ptr<mutex> lock_p) : lock(std::move(lock_p)), guard(*lock) {
+		StatementGuard(shared_ptr<std::timed_mutex> lock_p, ClientContext &context)
+		    : lock(std::move(lock_p)), guard(*lock, std::defer_lock) {
+			while (!guard.try_lock_for(milliseconds(10))) {
+				context.InterruptCheck();
+			}
 		}
 		StatementGuard(StatementGuard &&) = default;
 		StatementGuard &operator=(StatementGuard &&) = default;
 
-		shared_ptr<mutex> lock;
-		unique_lock<mutex> guard;
+		shared_ptr<std::timed_mutex> lock;
+		unique_lock<std::timed_mutex> guard;
 	};
 	unique_ptr<StatementGuard> statement_guard;
 
@@ -150,11 +154,11 @@ struct DebugClientContextState : public ClientContextState {
 		if (Exception::UncaughtException()) {
 			return;
 		}
-		D_ASSERT(!active_transaction);
+		D_ASSERT(active_transactions.empty());
 		D_ASSERT(!active_query);
 	}
 
-	bool active_transaction = false;
+	unordered_set<transaction_t> active_transactions;
 	bool active_query = false;
 
 	void QueryBegin(ClientContext &context) override {
@@ -170,24 +174,20 @@ struct DebugClientContextState : public ClientContextState {
 		active_query = false;
 	}
 	void TransactionBegin(MetaTransaction &transaction, ClientContext &context) override {
-		if (active_transaction) {
-			throw InternalException(
-			    "DebugClientContextState::TransactionBegin called when a transaction is already active");
+		if (!active_transactions.insert(transaction.global_transaction_id).second) {
+			throw InternalException("DebugClientContextState::TransactionBegin called twice for a transaction");
 		}
-		active_transaction = true;
 	}
 	void TransactionCommit(MetaTransaction &transaction, ClientContext &context) override {
-		if (!active_transaction) {
+		if (active_transactions.erase(transaction.global_transaction_id) != 1) {
 			throw InternalException("DebugClientContextState::TransactionCommit called when no transaction is active");
 		}
-		active_transaction = false;
 	}
 	void TransactionRollback(MetaTransaction &transaction, ClientContext &context) override {
-		if (!active_transaction) {
+		if (active_transactions.erase(transaction.global_transaction_id) != 1) {
 			throw InternalException(
 			    "DebugClientContextState::TransactionRollback called when no transaction is active");
 		}
-		active_transaction = false;
 	}
 #ifdef DUCKDB_DEBUG_REBIND
 	RebindQueryInfo OnPlanningError(ClientContext &context, SQLStatement &statement, ErrorData &error) override {
@@ -308,6 +308,15 @@ void ClientContext::DestroyIfSharedTransactionPinned() {
 	}
 }
 
+void ClientContext::GuardSharedTransaction(shared_ptr<std::timed_mutex> statement_lock) {
+	D_ASSERT(active_query);
+	if (active_query->statement_guard) {
+		D_ASSERT(active_query->statement_guard->lock == statement_lock);
+		return;
+	}
+	active_query->statement_guard = make_uniq<ActiveQueryContext::StatementGuard>(std::move(statement_lock), *this);
+}
+
 void ClientContext::ProcessError(ErrorData &error, const string &query) const {
 	error.FinalizeError();
 	if (Settings::Get<ErrorsAsJSONSetting>(*this)) {
@@ -330,7 +339,7 @@ void ClientContext::BeginQueryInternal(ClientContextLock &lock, const SQLStateme
 	if (ValidChecker::IsInvalidated(db_inst)) {
 		throw ErrorManager::InvalidatedDatabase(*this, ValidChecker::InvalidatedMessage(db_inst));
 	}
-	active_query = make_uniq<ActiveQueryContext>();
+	transaction.FinalizePendingTransactions();
 	if (transaction.IsAutoCommit()) {
 		transaction.BeginTransaction();
 	}
@@ -338,10 +347,15 @@ void ClientContext::BeginQueryInternal(ClientContextLock &lock, const SQLStateme
 	// Lock the shared DuckTransaction for the query duration.
 	auto &meta_transaction = transaction.ActiveTransaction();
 	auto shared_transaction = meta_transaction.SharedTransaction();
+	unique_ptr<ActiveQueryContext::StatementGuard> statement_guard;
 	if (shared_transaction) {
-		active_query->statement_guard =
-		    make_uniq<ActiveQueryContext::StatementGuard>(shared_transaction->GetStatementLock());
+		statement_guard = make_uniq<ActiveQueryContext::StatementGuard>(shared_transaction->GetStatementLock(), *this);
+		if (statement.type != StatementType::TRANSACTION_STATEMENT) {
+			shared_transaction->GetTransactionManager().ValidateSharedTransaction(*shared_transaction);
+		}
 	}
+	active_query = make_uniq<ActiveQueryContext>();
+	active_query->statement_guard = std::move(statement_guard);
 
 	transaction.SetActiveQuery(db->GetDatabaseManager().GetNewQueryNumber());
 	auto &query = statement.query;

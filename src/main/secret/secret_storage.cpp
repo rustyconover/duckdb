@@ -338,9 +338,15 @@ constexpr const char *CONNECTION_SECRET_STATE_KEY = "connection_secret_storage";
 //! Per-connection secret container. Lives on the ClientContext's RegisteredStateManager, so it is destroyed exactly
 //! when the connection (its ClientContext) goes away - giving automatic, crash-robust cleanup with no cooperation.
 //! Rollback is implemented here rather than by storing the secrets in a CatalogSet: the container is private to a
-//! single connection, and a connection runs one transaction at a time, so there is never a second snapshot to serve.
-//! All that is needed is undo - the pre-image of every secret the active transaction touched, replayed if it aborts.
+//! single connection, so there is never a second snapshot to serve. Shared commit votes can remain pending while the
+//! connection starts a later transaction, hence undo and last-modifier tracking are maintained per transaction.
 struct ConnectionSecretState : public ClientContextState {
+	struct UndoEntry {
+		unique_ptr<SecretEntry> secret;
+		transaction_t previous_modifier;
+		bool had_previous_modifier;
+	};
+
 	mutex lock;
 	//! The secrets of this connection: the last committed state, plus the changes of the active transaction
 	identifier_map_t<unique_ptr<SecretEntry>> secrets;
@@ -348,42 +354,56 @@ struct ConnectionSecretState : public ClientContextState {
 	//! Records the pre-image of `name` before the active transaction modifies it, so that a rollback can restore it.
 	//! Only the first change per name is recorded, making the undo replay order-independent.
 	void StageChange(MetaTransaction &transaction, const Identifier &name) {
-		if (undo_transaction_id != transaction.global_transaction_id) {
-			// First change of a new transaction: any leftover pre-images belong to a transaction that already ended
-			undo_log.clear();
-			undo_transaction_id = transaction.global_transaction_id;
-		}
+		auto &undo_log = undo_logs[transaction.global_transaction_id];
 		if (undo_log.find(name) != undo_log.end()) {
 			return;
 		}
 		auto entry = secrets.find(name);
 		auto pre_image = entry == secrets.end() ? nullptr : make_uniq<SecretEntry>(*entry->second);
-		undo_log.emplace(name, std::move(pre_image));
+		auto modifier = last_modifiers.find(name);
+		bool had_previous_modifier = modifier != last_modifiers.end();
+		auto previous_modifier = had_previous_modifier ? modifier->second : 0;
+		undo_log.emplace(name, UndoEntry {std::move(pre_image), previous_modifier, had_previous_modifier});
+		last_modifiers[name] = transaction.global_transaction_id;
 	}
 
 	void TransactionCommit(MetaTransaction &transaction, ClientContext &context) override {
 		lock_guard<mutex> guard(lock);
-		undo_log.clear();
+		undo_logs.erase(transaction.global_transaction_id);
 	}
 
 	void TransactionRollback(MetaTransaction &transaction, ClientContext &context) override {
 		lock_guard<mutex> guard(lock);
+		auto undo_entry = undo_logs.find(transaction.global_transaction_id);
+		if (undo_entry == undo_logs.end()) {
+			return;
+		}
+		auto &undo_log = undo_entry->second;
 		for (auto &entry : undo_log) {
-			if (entry.second) {
-				secrets[entry.first] = std::move(entry.second);
+			auto modifier = last_modifiers.find(entry.first);
+			if (modifier == last_modifiers.end() || modifier->second != transaction.global_transaction_id) {
+				continue;
+			}
+			if (entry.second.secret) {
+				secrets[entry.first] = std::move(entry.second.secret);
 			} else {
 				// The secret did not exist before the transaction
 				secrets.erase(entry.first);
 			}
+			if (entry.second.had_previous_modifier) {
+				modifier->second = entry.second.previous_modifier;
+			} else {
+				last_modifiers.erase(modifier);
+			}
 		}
-		undo_log.clear();
+		undo_logs.erase(undo_entry);
 	}
 
 private:
-	//! Pre-images of the secrets modified by the active transaction, a null entry meaning "did not exist"
-	identifier_map_t<unique_ptr<SecretEntry>> undo_log;
-	//! The transaction the pre-images belong to
-	transaction_t undo_transaction_id = 0;
+	//! Per-transaction pre-images and the transaction that produced each pre-image.
+	unordered_map<transaction_t, identifier_map_t<UndoEntry>> undo_logs;
+	//! Most recent transaction to modify each name, including names that are currently absent.
+	identifier_map_t<transaction_t> last_modifiers;
 };
 
 //! Fetch the calling connection's secret container. With create=false returns nullptr when there is no context or no

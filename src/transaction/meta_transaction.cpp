@@ -115,6 +115,10 @@ bool MetaTransaction::IsReadOnly() const {
 	return is_read_only;
 }
 
+shared_ptr<SharedTransactionState> MetaTransaction::GetSharedTransactionState() {
+	return shared_transaction ? shared_transaction->GetSharedState() : nullptr;
+}
+
 Transaction &Transaction::Get(ClientContext &context, Catalog &catalog) {
 	return Transaction::Get(context, catalog.GetAttached());
 }
@@ -142,6 +146,32 @@ void MetaTransaction::ValidateSharedTransaction(AttachedDatabase &db) {
 	}
 }
 
+void MetaTransaction::ValidateAdoption(AttachedDatabase &db) {
+	lock_guard<mutex> guard(lock);
+	if (shared_database) {
+		if (!RefersToSameObject(*shared_database, db)) {
+			throw TransactionException("Cannot participate in shared transactions for multiple databases");
+		}
+		throw TransactionException("This connection already participates in a shared transaction");
+	}
+	if (modified_database && !RefersToSameObject(*modified_database, db)) {
+		throw TransactionException("Cannot join transaction for database '%s': this transaction has already modified "
+		                           "database '%s'",
+		                           db.GetName(), modified_database->GetName());
+	}
+	auto entry = transactions.find(db);
+	if (entry == transactions.end()) {
+		return;
+	}
+	auto &current = entry->second.transaction;
+	if (!current.IsDuckTransaction() || current.Cast<DuckTransaction>().IsShared() ||
+	    current.Cast<DuckTransaction>().ChangesMade()) {
+		throw TransactionException("Cannot join transaction for database '%s': this connection already has a "
+		                           "transaction with local changes",
+		                           db.GetName());
+	}
+}
+
 void MetaTransaction::Adopt(AttachedDatabase &db, DuckTransaction &transaction) {
 	D_ASSERT(transaction.IsShared());
 	lock_guard<mutex> guard(lock);
@@ -153,6 +183,9 @@ void MetaTransaction::Adopt(AttachedDatabase &db, DuckTransaction &transaction) 
 		                           "database '%s'",
 		                           db.GetName(), modified_database->GetName());
 	}
+	reference_map_t<AttachedDatabase, TransactionReference> replacement;
+	replacement.insert({reference<AttachedDatabase>(db), TransactionReference(transaction)});
+	auto replacement_node = replacement.extract(replacement.begin());
 	auto entry = transactions.find(db);
 	if (entry != transactions.end()) {
 		auto &current = entry->second.transaction;
@@ -167,7 +200,7 @@ void MetaTransaction::Adopt(AttachedDatabase &db, DuckTransaction &transaction) 
 		}
 		db.GetTransactionManager().RollbackTransaction(current);
 		transactions.erase(entry);
-		transactions.insert({reference<AttachedDatabase>(db), TransactionReference(transaction)});
+		transactions.insert(std::move(replacement_node));
 		shared_database = &db;
 		shared_transaction = &transaction;
 		return;
@@ -178,7 +211,7 @@ void MetaTransaction::Adopt(AttachedDatabase &db, DuckTransaction &transaction) 
 	auto shared_db = db.shared_from_this();
 	UseDatabase(shared_db);
 	all_transactions.reserve(all_transactions.size() + 1);
-	transactions.insert({reference<AttachedDatabase>(db), TransactionReference(transaction)});
+	transactions.insert(std::move(replacement_node));
 	all_transactions.push_back(db);
 	shared_database = &db;
 	shared_transaction = &transaction;
@@ -335,6 +368,11 @@ void MetaTransaction::ModifyDatabase(AttachedDatabase &db, DatabaseModificationT
 	}
 	auto &transaction = GetTransaction(db);
 	if (transaction.IsReadOnly()) {
+		if (transaction.IsDuckTransaction() && transaction.Cast<DuckTransaction>().IsShared() &&
+		    transaction.Cast<DuckTransaction>().IsExplicitlyReadOnly()) {
+			throw TransactionException("Cannot write to database \"%s\" - shared transaction is read-only",
+			                           db.GetName());
+		}
 		transaction.SetReadWrite();
 	}
 	transaction.SetModifications(modification);

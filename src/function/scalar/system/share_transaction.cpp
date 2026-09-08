@@ -106,10 +106,16 @@ unique_ptr<FunctionLocalState> ShareTransactionInit(ExpressionState &state, cons
 		throw TransactionException("Database '%s' does not support shared transactions", database->GetName());
 	}
 	auto &duck_transaction = transaction.Cast<DuckTransaction>();
-	auto token = duck_transaction.GetTransactionManager().ShareTransaction(duck_transaction);
+	shared_ptr<std::timed_mutex> statement_lock;
+	if (duck_transaction.IsShared()) {
+		statement_lock = duck_transaction.GetStatementLock();
+	} else {
+		statement_lock = make_shared_ptr<std::timed_mutex>();
+		context.GuardSharedTransaction(statement_lock);
+	}
+	auto token = duck_transaction.GetTransactionManager().ShareTransaction(duck_transaction, std::move(statement_lock));
 	meta_transaction.SetSharedTransaction(*database, duck_transaction);
-	auto transaction_id = StringUtil::Format("%s/%s", token, database->GetName().GetIdentifierName());
-	return make_uniq<ShareTransactionLocalState>(std::move(transaction_id));
+	return make_uniq<ShareTransactionLocalState>(std::move(token));
 }
 
 void ShareTransactionFunction(DataChunk &input, ExpressionState &state, Vector &result) {

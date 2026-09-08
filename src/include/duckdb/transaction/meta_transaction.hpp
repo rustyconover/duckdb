@@ -25,6 +25,7 @@ class SecretStorage;
 struct DatabaseModificationType;
 class Transaction;
 class DuckTransaction;
+struct SharedTransactionState;
 
 enum class TransactionState { UNCOMMITTED, COMMITTED, ROLLED_BACK };
 
@@ -64,6 +65,7 @@ public:
 	optional_ptr<Transaction> TryGetTransaction(AttachedDatabase &db);
 	void RemoveTransaction(AttachedDatabase &db);
 	void ValidateSharedTransaction(AttachedDatabase &db);
+	void ValidateAdoption(AttachedDatabase &db);
 	void SetSharedTransaction(AttachedDatabase &db, DuckTransaction &transaction);
 	void Adopt(AttachedDatabase &db, DuckTransaction &transaction);
 
@@ -87,6 +89,7 @@ public:
 	optional_ptr<DuckTransaction> SharedTransaction() {
 		return shared_transaction;
 	}
+	shared_ptr<SharedTransactionState> GetSharedTransactionState();
 	const vector<reference<AttachedDatabase>> &OpenedTransactions() const {
 		return all_transactions;
 	}

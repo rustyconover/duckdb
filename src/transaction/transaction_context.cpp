@@ -21,6 +21,10 @@ TransactionContext::TransactionContext(ClientContext &context)
 }
 
 TransactionContext::~TransactionContext() {
+	try {
+		FinalizePendingTransactions();
+	} catch (...) { // NOLINT
+	}
 	if (current_transaction) {
 		try {
 			Rollback(nullptr);
@@ -39,6 +43,7 @@ void TransactionContext::BeginTransaction() {
 	if (current_transaction) {
 		throw TransactionException("cannot start a transaction within a transaction");
 	}
+	FinalizePendingTransactions();
 	auto start_timestamp = Timestamp::GetCurrentTimestamp();
 	auto global_transaction_id = context.db->GetDatabaseManager().GetNewTransactionNumber();
 	current_transaction = make_uniq<MetaTransaction>(context, start_timestamp, global_transaction_id);
@@ -67,8 +72,32 @@ void TransactionContext::Commit() {
 	}
 	autocheckpoint_error = ErrorData();
 	auto transaction = std::move(current_transaction);
+	auto shared_state = transaction->GetSharedTransactionState();
+	shared_ptr<ClientContext> pending_context;
+	if (shared_state) {
+		pending_transactions.reserve(pending_transactions.size() + 1);
+		shared_state->ReservePendingContext();
+		pending_context = context.shared_from_this();
+	}
 	ClearTransaction();
 	auto error = transaction->Commit();
+	if (shared_state && !error.HasError()) {
+		context.AddSharedTransactionPin();
+		if (!shared_state->AddPendingContext(pending_context)) {
+			context.RemoveSharedTransactionPin();
+			if (shared_state->outcome.load() == SharedTransactionOutcome::ROLLED_BACK) {
+				error = ErrorData(ExceptionType::TRANSACTION,
+				                  "Cannot commit shared transaction: another connection has rolled back");
+			}
+		} else {
+			PendingSharedTransaction pending;
+			pending.transaction = std::move(transaction);
+			pending.state = std::move(shared_state);
+			pending_transactions.push_back(std::move(pending));
+			return;
+		}
+	}
+	FinalizePendingTransactions();
 	// Notify any registered state of transaction commit
 	if (error.HasError()) {
 		for (auto const &s : context.registered_state->States()) {
@@ -88,6 +117,29 @@ void TransactionContext::Commit() {
 		auto err = std::move(autocheckpoint_error);
 		autocheckpoint_error = ErrorData();
 		err.Throw();
+	}
+}
+
+void TransactionContext::FinalizePendingTransactions() {
+	for (idx_t i = 0; i < pending_transactions.size();) {
+		auto outcome = pending_transactions[i].state->outcome.load();
+		if (outcome == SharedTransactionOutcome::PENDING) {
+			i++;
+			continue;
+		}
+		auto transaction = std::move(pending_transactions[i].transaction);
+		pending_transactions.erase_at(i);
+		if (outcome == SharedTransactionOutcome::COMMITTED) {
+			for (auto &state : context.registered_state->States()) {
+				state->TransactionCommit(*transaction, context);
+			}
+		} else {
+			ErrorData error(ExceptionType::TRANSACTION, "Shared transaction was rolled back by another participant");
+			for (auto &state : context.registered_state->States()) {
+				state->TransactionRollback(*transaction, context, error);
+			}
+		}
+		transaction->Finalize();
 	}
 }
 
@@ -116,6 +168,7 @@ void TransactionContext::Rollback(optional_ptr<ErrorData> error) {
 	} catch (std::exception &ex) {
 		rollback_error = ErrorData(ex);
 	}
+	FinalizePendingTransactions();
 	// Notify any registered state of transaction rollback
 	for (auto const &s : context.registered_state->States()) {
 		s->TransactionRollback(*transaction, context, error);
@@ -149,34 +202,30 @@ void TransactionContext::JoinTransaction(const string &transaction_id) {
 			throw TransactionException("JOIN TRANSACTION id contains a control character");
 		}
 	}
-
-	// Split at the first slash so database names may themselves contain slashes.
-	auto slash = transaction_id.find('/');
-	if (slash == string::npos || slash == 0 || slash + 1 == transaction_id.size()) {
-		throw TransactionException("Invalid transaction id '%s': expected '<capability>/<database_name>'",
-		                           transaction_id);
+	if (ValidChecker::IsInvalidated(*current_transaction)) {
+		throw TransactionException("Cannot join a shared transaction from an invalidated transaction");
 	}
-	auto token = transaction_id.substr(0, slash);
-	auto database_name = Identifier(transaction_id.substr(slash + 1));
-	auto database = DatabaseManager::Get(context).GetDatabase(context, database_name);
+
+	auto &database_manager = DatabaseManager::Get(context);
+	auto database = database_manager.GetSharedTransactionDatabase(transaction_id);
 	if (!database) {
-		throw TransactionException("Invalid transaction id '%s': database '%s' does not exist", transaction_id,
-		                           database_name);
+		throw TransactionException("Shared transaction is no longer available");
+	}
+	if (ValidChecker::IsInvalidated(*database)) {
+		throw TransactionException("Cannot join shared transaction: %s", ValidChecker::InvalidatedMessage(*database));
 	}
 	auto &transaction_manager = database->GetTransactionManager();
 	if (!transaction_manager.IsDuckTransactionManager()) {
-		throw TransactionException("Database '%s' does not support shared transactions", database_name);
+		throw TransactionException("Database '%s' does not support shared transactions", database->GetName());
 	}
 	auto &duck_manager = transaction_manager.Cast<DuckTransactionManager>();
-	auto &transaction = duck_manager.JoinTransaction(token);
+	context.GuardSharedTransaction(duck_manager.GetSharedTransactionLock(transaction_id));
+	current_transaction->ValidateAdoption(*database);
+	auto &transaction = duck_manager.JoinTransaction(transaction_id);
 	try {
 		current_transaction->Adopt(*database, transaction);
 	} catch (...) {
-		// Release the participant registered by JoinTransaction.
-		try {
-			(void)duck_manager.CommitTransaction(context, transaction);
-		} catch (...) { // NOLINT
-		}
+		duck_manager.CancelJoin(transaction);
 		throw;
 	}
 }

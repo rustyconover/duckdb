@@ -187,6 +187,8 @@ public:
 	void RemoveSharedTransactionPin();
 	//! Destroy this context on connection close when a shared transaction would otherwise keep it alive.
 	void DestroyIfSharedTransactionPinned();
+	//! Hold a shared transaction's statement lock for the active query.
+	void GuardSharedTransaction(shared_ptr<std::timed_mutex> statement_lock);
 
 	//! Get the table info of a specific table, or nullptr if it cannot be found.
 	DUCKDB_API unique_ptr<TableDescription> TableInfo(const Identifier &database_name, const Identifier &schema_name,
