@@ -14,8 +14,20 @@
 
 namespace duckdb {
 
-//! Statement gate of an exported transaction. The exporter's statements lock it exclusively, participants' statements
-//! lock it shared. It can be released by a different thread than the one that acquired it.
+//! Statement gate of an exported transaction (see duckdb_export_snapshot / SET TRANSACTION SNAPSHOT).
+//!
+//! A DuckTransaction's undo buffer and LocalStorage are built for a single writer and are not safe to mutate while
+//! another connection reads them. Participants only read, so they may run at the same time as each other, but never
+//! at the same time as the exporter, which is the only connection that can modify the transaction. This gate enforces
+//! exactly that: participants' statements take it shared, the exporter's statements take it exclusively.
+//!
+//! The gate is per statement, not per query operator: a single statement holds it once for its whole duration, so
+//! intra-query parallelism inside that statement is unaffected. The exporter's connection close also takes it
+//! exclusively, so a transaction is never torn down underneath a participant that is mid-read.
+//!
+//! Waiting writers block new readers, so a stream of participant reads cannot starve the exporter. Acquire and
+//! release may happen on different threads, because a statement's guard is taken on whichever thread begins the
+//! query and dropped when the query ends.
 class SharedTransactionLock {
 public:
 	//! Invoked every few milliseconds while waiting; throwing abandons the wait.

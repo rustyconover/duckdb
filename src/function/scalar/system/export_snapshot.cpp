@@ -115,7 +115,7 @@ unique_ptr<FunctionLocalState> ExportSnapshotInit(ExpressionState &state, const 
 		// The manager pre-locked the statement lock for this statement; hand it to the active query.
 		try {
 			meta_transaction.SetSharedTransaction(*database, shared_state);
-			context.AdoptSharedTransactionGuard(shared_state->statement_lock);
+			context.GuardSharedTransaction(shared_state->statement_lock, SharedTransactionGuardMode::ADOPT_EXCLUSIVE);
 		} catch (...) {
 			shared_state->statement_lock->UnlockExclusive();
 			throw;

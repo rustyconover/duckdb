@@ -60,6 +60,16 @@ class ClientContextState;
 class RegisteredStateManager;
 class SharedTransactionLock;
 
+//! How a query takes hold of an exported transaction's statement lock.
+enum class SharedTransactionGuardMode : uint8_t {
+	//! A participant's statement: reads only, so it may run alongside other participants.
+	ACQUIRE_SHARED,
+	//! The exporting connection's statement: excludes every participant.
+	ACQUIRE_EXCLUSIVE,
+	//! Take over the exclusive lock that DuckTransactionManager::ShareTransaction already holds.
+	ADOPT_EXCLUSIVE
+};
+
 struct PendingQueryParameters {
 	//! Prepared statement parameters (if any)
 	optional_ptr<identifier_map_t<BoundParameterData>> parameters;
@@ -146,8 +156,6 @@ public:
 
 	//! Check for interrupt or timeout, throws InterruptException if triggered
 	DUCKDB_API void InterruptCheck() const;
-	//! Throw if the query deadline has passed. Unlike InterruptCheck this always consults the clock.
-	DUCKDB_API void CheckQueryDeadline() const;
 
 	//! Enable query profiling
 	DUCKDB_API void EnableProfiling();
@@ -185,10 +193,8 @@ public:
 
 	//! Destroy the client context
 	DUCKDB_API void Destroy();
-	//! Acquire a shared transaction's statement lock for the active query, including an open streaming result.
-	void GuardSharedTransaction(shared_ptr<SharedTransactionLock> statement_lock, bool exclusive);
-	//! Adopt an already-held shared transaction statement lock for the active query.
-	void AdoptSharedTransactionGuard(shared_ptr<SharedTransactionLock> statement_lock);
+	//! Hold an exported transaction's statement lock for the active query, including an open streaming result.
+	void GuardSharedTransaction(shared_ptr<SharedTransactionLock> statement_lock, SharedTransactionGuardMode mode);
 
 	//! Get the table info of a specific table, or nullptr if it cannot be found.
 	DUCKDB_API unique_ptr<TableDescription> TableInfo(const Identifier &database_name, const Identifier &schema_name,

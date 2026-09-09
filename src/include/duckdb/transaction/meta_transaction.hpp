@@ -88,14 +88,14 @@ public:
 		return modified_database;
 	}
 	optional_ptr<AttachedDatabase> SharedDatabase() {
-		return shared_database;
+		return shared.database;
 	}
 	shared_ptr<SharedTransactionState> GetSharedTransactionState() const {
-		return shared_state;
+		return shared.state;
 	}
 	//! True when the shared transaction was exported by another connection.
 	bool IsSharedParticipant() const {
-		return shared_participant;
+		return shared.is_participant;
 	}
 	const vector<reference<AttachedDatabase>> &OpenedTransactions() const {
 		return all_transactions;
@@ -120,12 +120,16 @@ private:
 	vector<reference<AttachedDatabase>> all_transactions;
 	//! The database we are modifying. We can only modify one database per meta transaction.
 	optional_ptr<AttachedDatabase> modified_database;
-	//! The database whose transaction is shared. Only this database may be modified.
-	optional_ptr<AttachedDatabase> shared_database;
-	//! The shared transaction state, when this transaction exported or joined one.
-	shared_ptr<SharedTransactionState> shared_state;
-	//! True when the shared transaction was exported by another connection.
-	bool shared_participant = false;
+	//! This transaction's involvement in an exported transaction snapshot. All three fields are set together.
+	struct SharedTransactionParticipation {
+		//! The one database the snapshot covers. Null when this transaction neither exported nor joined one.
+		optional_ptr<AttachedDatabase> database;
+		//! State shared with every connection taking part, including the statement lock and the ended flag.
+		shared_ptr<SharedTransactionState> state;
+		//! True when another connection exported the transaction, false when this one did.
+		bool is_participant = false;
+	};
+	SharedTransactionParticipation shared;
 	//! Whether the meta transaction is marked as read only.
 	bool is_read_only;
 	//! Lock for referenced_databases.

@@ -99,24 +99,30 @@ public:
 	unique_ptr<ProgressBar> progress_bar;
 	//! Holds a shared transaction's statement lock for the duration of this query.
 	struct StatementGuard {
-		struct AdoptExclusiveLock {};
-
 		//! Acquire the lock, checking for interrupts and the query deadline while waiting.
-		StatementGuard(shared_ptr<SharedTransactionLock> lock_p, bool exclusive_p, ClientContext &context)
-		    : lock(std::move(lock_p)), exclusive(exclusive_p) {
+		StatementGuard(shared_ptr<SharedTransactionLock> lock_p, SharedTransactionGuardMode mode,
+		               ClientContext &context)
+		    : lock(std::move(lock_p)), exclusive(mode != SharedTransactionGuardMode::ACQUIRE_SHARED) {
+			if (mode == SharedTransactionGuardMode::ADOPT_EXCLUSIVE) {
+				// ShareTransaction already holds it exclusively on behalf of this query.
+				return;
+			}
+			// InterruptCheck only samples the clock every N calls, so check the deadline on every poll.
 			auto wait_check = [&context]() {
 				context.InterruptCheck();
-				context.CheckQueryDeadline();
+				if (context.query_deadline.IsValid()) {
+					auto now =
+					    NumericCast<idx_t>(duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
+					if (now >= context.query_deadline.GetIndex()) {
+						throw InterruptException("Query exceeded maximum execution time");
+					}
+				}
 			};
 			if (exclusive) {
 				lock->LockExclusive(wait_check);
 			} else {
 				lock->LockShared(wait_check);
 			}
-		}
-		//! Take over an exclusive lock that the caller already holds.
-		StatementGuard(shared_ptr<SharedTransactionLock> lock_p, AdoptExclusiveLock)
-		    : lock(std::move(lock_p)), exclusive(true) {
 		}
 		~StatementGuard() {
 			if (exclusive) {
@@ -318,7 +324,7 @@ void ClientContext::Destroy() {
 			    !(active_query && active_query->statement_guard)) {
 				shared_state->statement_lock->LockExclusive();
 				statement_guard = make_uniq<ActiveQueryContext::StatementGuard>(
-				    shared_state->statement_lock, ActiveQueryContext::StatementGuard::AdoptExclusiveLock());
+				    shared_state->statement_lock, SharedTransactionGuardMode::ADOPT_EXCLUSIVE, *this);
 			}
 			transaction.Rollback(nullptr);
 		}
@@ -326,22 +332,17 @@ void ClientContext::Destroy() {
 	CleanupInternal(*lock);
 }
 
-void ClientContext::GuardSharedTransaction(shared_ptr<SharedTransactionLock> statement_lock, bool exclusive) {
+void ClientContext::GuardSharedTransaction(shared_ptr<SharedTransactionLock> statement_lock,
+                                           SharedTransactionGuardMode mode) {
 	D_ASSERT(active_query);
 	if (active_query->statement_guard) {
+		// The query already holds this lock; an exclusive hold also covers a shared request.
 		D_ASSERT(active_query->statement_guard->lock == statement_lock);
-		D_ASSERT(active_query->statement_guard->exclusive || !exclusive);
+		D_ASSERT(active_query->statement_guard->exclusive || mode == SharedTransactionGuardMode::ACQUIRE_SHARED);
 		return;
 	}
 	active_query->statement_guard =
-	    make_uniq<ActiveQueryContext::StatementGuard>(std::move(statement_lock), exclusive, *this);
-}
-
-void ClientContext::AdoptSharedTransactionGuard(shared_ptr<SharedTransactionLock> statement_lock) {
-	D_ASSERT(active_query);
-	D_ASSERT(!active_query->statement_guard);
-	active_query->statement_guard = make_uniq<ActiveQueryContext::StatementGuard>(
-	    std::move(statement_lock), ActiveQueryContext::StatementGuard::AdoptExclusiveLock());
+	    make_uniq<ActiveQueryContext::StatementGuard>(std::move(statement_lock), mode, *this);
 }
 
 void ClientContext::ProcessError(ErrorData &error, const string &query) const {
@@ -384,8 +385,9 @@ void ClientContext::BeginQueryInternal(ClientContextLock &lock, const SQLStateme
 		auto shared_state = meta_transaction.GetSharedTransactionState();
 		if (shared_state) {
 			// The exporter's statements exclude everyone; participants only read and may run concurrently.
-			statement_guard = make_uniq<ActiveQueryContext::StatementGuard>(
-			    shared_state->statement_lock, !meta_transaction.IsSharedParticipant(), *this);
+			auto mode = meta_transaction.IsSharedParticipant() ? SharedTransactionGuardMode::ACQUIRE_SHARED
+			                                                   : SharedTransactionGuardMode::ACQUIRE_EXCLUSIVE;
+			statement_guard = make_uniq<ActiveQueryContext::StatementGuard>(shared_state->statement_lock, mode, *this);
 			if (statement.type != StatementType::TRANSACTION_STATEMENT && shared_state->ended.load()) {
 				throw TransactionException("Shared transaction has ended: the exporting connection has committed or "
 				                           "rolled back. COMMIT or ROLLBACK detaches from it");
@@ -1435,16 +1437,6 @@ void ClientContext::InterruptCheck() const {
 	}
 }
 
-void ClientContext::CheckQueryDeadline() const {
-	if (!query_deadline.IsValid()) {
-		return;
-	}
-	auto now = NumericCast<idx_t>(duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
-	if (now >= query_deadline.GetIndex()) {
-		throw InterruptException("Query exceeded maximum execution time");
-	}
-}
-
 void ClientContext::CancelTransaction() {
 	auto lock = LockContext();
 	InitialCleanup(*lock);
@@ -1501,12 +1493,13 @@ void ClientContext::RunFunctionInTransactionInternal(ClientContextLock &lock, co
 		auto &meta_transaction = transaction.ActiveTransaction();
 		auto shared_state = meta_transaction.GetSharedTransactionState();
 		if (shared_state) {
-			bool exclusive = !meta_transaction.IsSharedParticipant();
+			auto mode = meta_transaction.IsSharedParticipant() ? SharedTransactionGuardMode::ACQUIRE_SHARED
+			                                                   : SharedTransactionGuardMode::ACQUIRE_EXCLUSIVE;
 			if (active_query) {
-				GuardSharedTransaction(shared_state->statement_lock, exclusive);
+				GuardSharedTransaction(shared_state->statement_lock, mode);
 			} else {
 				statement_guard =
-				    make_uniq<ActiveQueryContext::StatementGuard>(shared_state->statement_lock, exclusive, *this);
+				    make_uniq<ActiveQueryContext::StatementGuard>(shared_state->statement_lock, mode, *this);
 			}
 			if (shared_state->ended.load()) {
 				throw TransactionException("Shared transaction has ended: the exporting connection has committed or "

@@ -175,7 +175,8 @@ void TransactionContext::SetTransactionSnapshot(const string &snapshot_id) {
 	}
 	auto &duck_manager = transaction_manager.Cast<DuckTransactionManager>();
 	// Hold the statement lock before looking the transaction up so the exporter cannot end it underneath us.
-	context.GuardSharedTransaction(duck_manager.GetSharedTransactionState(snapshot_id)->statement_lock, false);
+	context.GuardSharedTransaction(duck_manager.GetSharedTransactionState(snapshot_id)->statement_lock,
+	                               SharedTransactionGuardMode::ACQUIRE_SHARED);
 	auto &transaction = duck_manager.JoinTransaction(snapshot_id);
 	current_transaction->Adopt(*database, transaction);
 }

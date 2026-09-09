@@ -65,6 +65,38 @@ static bool WaitForCapture(const shared_ptr<CaptureTransactionState> &capture) {
 	return capture->signal.wait_for(guard, std::chrono::seconds(5), [&]() { return capture->captured; });
 }
 
+//! Counts how many statements are inside the shared gate at once, and blocks until `target` of them arrive.
+struct ConcurrencyProbe {
+	mutex lock;
+	std::condition_variable signal;
+	idx_t active = 0;
+	idx_t peak = 0;
+	idx_t target = 0;
+	bool timed_out = false;
+};
+
+static void RegisterConcurrencyProbe(Connection &connection, const shared_ptr<ConcurrencyProbe> &probe) {
+	ScalarFunction function("concurrency_probe", {LogicalType::BIGINT}, LogicalType::BIGINT,
+	                        [probe](DataChunk &input, ExpressionState &, Vector &result) {
+		                        {
+			                        unique_lock<mutex> guard(probe->lock);
+			                        probe->active++;
+			                        probe->peak = MaxValue<idx_t>(probe->peak, probe->active);
+			                        probe->signal.notify_all();
+			                        // Wait for the other participants; if the gate serialized us this times out.
+			                        if (!probe->signal.wait_for(guard, std::chrono::seconds(5),
+			                                                    [&]() { return probe->active >= probe->target; })) {
+				                        probe->timed_out = true;
+			                        }
+			                        probe->active--;
+		                        }
+		                        result.Reference(input.data[0]);
+	                        });
+	CreateScalarFunctionInfo info(function);
+	connection.context->RunFunctionInTransaction(
+	    [&]() { Catalog::GetSystemCatalog(*connection.context).CreateFunction(*connection.context, info); });
+}
+
 TEST_CASE("Transactions can be shared between connections", "[api][transaction_snapshot]") {
 	DuckDB database(nullptr);
 	Connection owner(database);
@@ -784,4 +816,72 @@ TEST_CASE("Joiner temporary changes roll back on detach", "[api][transaction_sna
 	REQUIRE_NO_FAIL(owner.Query("COMMIT"));
 	result = owner.Query("SELECT value FROM shared_values");
 	REQUIRE(CHECK_COLUMN(result, 0, {42}));
+}
+
+TEST_CASE("Participants read the snapshot concurrently", "[api][transaction_snapshot]") {
+	constexpr idx_t PARTICIPANT_COUNT = 4;
+	DuckDB database(nullptr);
+	Connection setup(database);
+	Connection owner(database);
+	auto probe = make_shared_ptr<ConcurrencyProbe>();
+	probe->target = PARTICIPANT_COUNT;
+	RegisterConcurrencyProbe(setup, probe);
+	REQUIRE_NO_FAIL(setup.Query("CREATE TABLE shared_values (value BIGINT)"));
+
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	// Uncommitted: only the exporter and its participants can see these rows.
+	REQUIRE_NO_FAIL(owner.Query("INSERT INTO shared_values SELECT * FROM range(1000)"));
+	auto transaction_id = ExportSnapshot(owner);
+
+	vector<unique_ptr<Connection>> participants;
+	for (idx_t i = 0; i < PARTICIPANT_COUNT; i++) {
+		participants.push_back(make_uniq<Connection>(database));
+		SetTransactionSnapshot(*participants.back(), transaction_id);
+	}
+
+	// Every participant must be inside its statement at the same time, otherwise the probe times out.
+	vector<unique_ptr<QueryResult>> results(PARTICIPANT_COUNT);
+	vector<std::thread> threads;
+	for (idx_t i = 0; i < PARTICIPANT_COUNT; i++) {
+		threads.emplace_back([&, i]() {
+			results[i] = participants[i]->Query("SELECT count(concurrency_probe(value)) FROM shared_values");
+		});
+	}
+	for (auto &thread : threads) {
+		thread.join();
+	}
+	for (idx_t i = 0; i < PARTICIPANT_COUNT; i++) {
+		REQUIRE_NO_FAIL(*results[i]);
+		REQUIRE(CHECK_COLUMN(results[i], 0, {1000}));
+	}
+	REQUIRE(!probe->timed_out);
+	REQUIRE(probe->peak == PARTICIPANT_COUNT);
+
+	for (auto &participant : participants) {
+		REQUIRE_NO_FAIL(participant->Query("ROLLBACK"));
+	}
+	REQUIRE_NO_FAIL(owner.Query("COMMIT"));
+}
+
+TEST_CASE("A participant statement still uses intra-query parallelism", "[api][transaction_snapshot]") {
+	DuckDB database(nullptr);
+	Connection setup(database);
+	Connection owner(database);
+	Connection joiner(database);
+	REQUIRE_NO_FAIL(setup.Query("CREATE TABLE shared_values (value BIGINT)"));
+
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	REQUIRE_NO_FAIL(owner.Query("INSERT INTO shared_values SELECT * FROM range(500000)"));
+	SetTransactionSnapshot(joiner, ExportSnapshot(owner));
+
+	REQUIRE_NO_FAIL(joiner.Query("SET threads = 4"));
+	auto result = joiner.Query("SELECT count(*), sum(value) FROM shared_values");
+	REQUIRE(CHECK_COLUMN(result, 0, {500000}));
+	REQUIRE(CHECK_COLUMN(result, 1, {Value::BIGINT(124999750000LL)}));
+	// The gate is held once per statement, so the scan is free to fan out across the thread pool.
+	result = joiner.Query("SELECT current_setting('threads')");
+	REQUIRE(CHECK_COLUMN(result, 0, {Value("4")}));
+
+	REQUIRE_NO_FAIL(joiner.Query("ROLLBACK"));
+	REQUIRE_NO_FAIL(owner.Query("COMMIT"));
 }

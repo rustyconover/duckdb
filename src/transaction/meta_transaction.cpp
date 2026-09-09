@@ -54,7 +54,7 @@ optional_ptr<Transaction> MetaTransaction::TryGetTransaction(AttachedDatabase &d
 	if (entry == transactions.end()) {
 		return nullptr;
 	}
-	if (entry->second.participant && shared_state->ended.load()) {
+	if (entry->second.participant && shared.state->ended.load()) {
 		// The exporter has ended the transaction; the object may be gone.
 		return nullptr;
 	}
@@ -84,7 +84,7 @@ Transaction &MetaTransaction::GetTransaction(AttachedDatabase &db) {
 
 		return new_transaction;
 	} else {
-		if (entry->second.participant && shared_state->ended.load()) {
+		if (entry->second.participant && shared.state->ended.load()) {
 			throw TransactionException("Shared transaction has ended: the exporting connection has committed or "
 			                           "rolled back. COMMIT or ROLLBACK detaches from it");
 		}
@@ -131,27 +131,27 @@ void MetaTransaction::SetSharedTransaction(AttachedDatabase &db, shared_ptr<Shar
 	D_ASSERT(state);
 	lock_guard<mutex> guard(lock);
 	D_ASSERT(transactions.find(db) != transactions.end());
-	D_ASSERT(!shared_database || RefersToSameObject(*shared_database, db));
-	shared_database = &db;
-	shared_state = std::move(state);
+	D_ASSERT(!shared.database || RefersToSameObject(*shared.database, db));
+	shared.database = &db;
+	shared.state = std::move(state);
 }
 
 void MetaTransaction::ValidateShare(AttachedDatabase &db) {
 	lock_guard<mutex> guard(lock);
-	if (shared_database && !RefersToSameObject(*shared_database, db)) {
+	if (shared.database && !RefersToSameObject(*shared.database, db)) {
 		throw TransactionException("Cannot share transaction for database %s: this transaction already takes part "
 		                           "in a shared transaction for database %s",
-		                           db.GetName(), shared_database->GetName());
+		                           db.GetName(), shared.database->GetName());
 	}
 }
 
 void MetaTransaction::Adopt(AttachedDatabase &db, DuckTransaction &transaction) {
 	D_ASSERT(transaction.IsShared());
 	lock_guard<mutex> guard(lock);
-	if (shared_database) {
+	if (shared.database) {
 		throw TransactionException("Cannot set the transaction snapshot for database %s: this connection already takes "
 		                           "part in a shared transaction for database %s",
-		                           db.GetName(), shared_database->GetName());
+		                           db.GetName(), shared.database->GetName());
 	}
 	{
 		lock_guard<mutex> referenced_guard(referenced_database_lock);
@@ -176,16 +176,16 @@ void MetaTransaction::Adopt(AttachedDatabase &db, DuckTransaction &transaction) 
 	all_transactions.push_back(db);
 	auto shared_db = db.shared_from_this();
 	UseDatabase(shared_db);
-	shared_database = &db;
-	shared_state = transaction.GetSharedState();
-	shared_participant = true;
+	shared.database = &db;
+	shared.state = transaction.GetSharedState();
+	shared.is_participant = true;
 }
 
 void MetaTransaction::EndSharedTransaction() {
-	if (!shared_state || shared_participant) {
+	if (!shared.state || shared.is_participant) {
 		return;
 	}
-	auto entry = transactions.find(*shared_database);
+	auto entry = transactions.find(*shared.database);
 	D_ASSERT(entry != transactions.end());
 	auto &transaction = entry->second.transaction.Cast<DuckTransaction>();
 	transaction.GetTransactionManager().EndSharedTransaction(transaction);
@@ -350,7 +350,7 @@ void MetaTransaction::ModifyDatabase(AttachedDatabase &db, DatabaseModificationT
 		throw TransactionException("Cannot write to database %s - transaction is launched in read-only mode",
 		                           db.GetName());
 	}
-	if (shared_participant && RefersToSameObject(*shared_database, db)) {
+	if (shared.is_participant && RefersToSameObject(*shared.database, db)) {
 		throw TransactionException("Cannot write to database %s - only the exporting connection can modify a shared "
 		                           "transaction",
 		                           db.GetName());
