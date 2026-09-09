@@ -12,6 +12,7 @@
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
+#include "duckdb/transaction/shared_transaction_lock.hpp"
 
 namespace duckdb {
 
@@ -21,11 +22,16 @@ TransactionContext::TransactionContext(ClientContext &context)
 }
 
 TransactionContext::~TransactionContext() {
-	try {
-		FinalizePendingTransactions();
-	} catch (...) { // NOLINT
-	}
 	if (current_transaction) {
+		// An exporter waits for in-flight participant statements before its transaction goes away. This path is
+		// reached when the context is destroyed during exception unwinding, which skips ClientContext::Destroy.
+		shared_ptr<SharedTransactionState> shared_state;
+		if (!current_transaction->IsSharedParticipant()) {
+			shared_state = current_transaction->GetSharedTransactionState();
+		}
+		if (shared_state) {
+			shared_state->statement_lock->LockExclusive();
+		}
 		try {
 			Rollback(nullptr);
 		} catch (std::exception &ex) {
@@ -36,6 +42,9 @@ TransactionContext::~TransactionContext() {
 			}
 		} catch (...) { // NOLINT
 		}
+		if (shared_state) {
+			shared_state->statement_lock->UnlockExclusive();
+		}
 	}
 }
 
@@ -43,7 +52,6 @@ void TransactionContext::BeginTransaction() {
 	if (current_transaction) {
 		throw TransactionException("cannot start a transaction within a transaction");
 	}
-	FinalizePendingTransactions();
 	auto start_timestamp = Timestamp::GetCurrentTimestamp();
 	auto global_transaction_id = context.db->GetDatabaseManager().GetNewTransactionNumber();
 	current_transaction = make_uniq<MetaTransaction>(context, start_timestamp, global_transaction_id);
@@ -72,32 +80,8 @@ void TransactionContext::Commit() {
 	}
 	autocheckpoint_error = ErrorData();
 	auto transaction = std::move(current_transaction);
-	auto shared_state = transaction->GetSharedTransactionState();
-	shared_ptr<ClientContext> pending_context;
-	if (shared_state) {
-		pending_transactions.reserve(pending_transactions.size() + 1);
-		shared_state->ReservePendingContext();
-		pending_context = context.shared_from_this();
-	}
 	ClearTransaction();
 	auto error = transaction->Commit();
-	if (shared_state && !error.HasError()) {
-		context.AddSharedTransactionPin();
-		if (!shared_state->AddPendingContext(pending_context)) {
-			context.RemoveSharedTransactionPin();
-			if (shared_state->outcome.load() == SharedTransactionOutcome::ROLLED_BACK) {
-				error = ErrorData(ExceptionType::TRANSACTION,
-				                  "Cannot commit shared transaction: another connection has rolled back");
-			}
-		} else {
-			PendingSharedTransaction pending;
-			pending.transaction = std::move(transaction);
-			pending.state = std::move(shared_state);
-			pending_transactions.push_back(std::move(pending));
-			return;
-		}
-	}
-	FinalizePendingTransactions();
 	// Notify any registered state of transaction commit
 	if (error.HasError()) {
 		for (auto const &s : context.registered_state->States()) {
@@ -117,29 +101,6 @@ void TransactionContext::Commit() {
 		auto err = std::move(autocheckpoint_error);
 		autocheckpoint_error = ErrorData();
 		err.Throw();
-	}
-}
-
-void TransactionContext::FinalizePendingTransactions() {
-	for (idx_t i = 0; i < pending_transactions.size();) {
-		auto outcome = pending_transactions[i].state->outcome.load();
-		if (outcome == SharedTransactionOutcome::PENDING) {
-			i++;
-			continue;
-		}
-		auto transaction = std::move(pending_transactions[i].transaction);
-		pending_transactions.erase_at(i);
-		if (outcome == SharedTransactionOutcome::COMMITTED) {
-			for (auto &state : context.registered_state->States()) {
-				state->TransactionCommit(*transaction, context);
-			}
-		} else {
-			ErrorData error(ExceptionType::TRANSACTION, "Shared transaction was rolled back by another participant");
-			for (auto &state : context.registered_state->States()) {
-				state->TransactionRollback(*transaction, context, error);
-			}
-		}
-		transaction->Finalize();
 	}
 }
 
@@ -168,7 +129,6 @@ void TransactionContext::Rollback(optional_ptr<ErrorData> error) {
 	} catch (std::exception &ex) {
 		rollback_error = ErrorData(ex);
 	}
-	FinalizePendingTransactions();
 	// Notify any registered state of transaction rollback
 	for (auto const &s : context.registered_state->States()) {
 		s->TransactionRollback(*transaction, context, error);
@@ -184,50 +144,40 @@ void TransactionContext::ClearTransaction() {
 	current_transaction = nullptr;
 }
 
-void TransactionContext::JoinTransaction(const string &transaction_id) {
+void TransactionContext::SetTransactionSnapshot(const string &snapshot_id) {
 	if (auto_commit || !current_transaction) {
-		throw TransactionException("JOIN TRANSACTION can only be used inside an explicit transaction");
+		throw TransactionException("SET TRANSACTION SNAPSHOT can only be used inside an explicit transaction");
 	}
-	constexpr idx_t MAX_TRANSACTION_ID_LENGTH = 1024;
-	if (transaction_id.empty()) {
-		throw TransactionException("JOIN TRANSACTION requires a non-empty transaction id");
-	}
-	if (transaction_id.size() > MAX_TRANSACTION_ID_LENGTH) {
-		throw TransactionException("JOIN TRANSACTION id exceeds the maximum length of %llu bytes",
-		                           static_cast<uint64_t>(MAX_TRANSACTION_ID_LENGTH));
-	}
-	for (auto character : transaction_id) {
-		auto byte = static_cast<unsigned char>(character);
-		if (byte < 0x20 || byte == 0x7f) {
-			throw TransactionException("JOIN TRANSACTION id contains a control character");
-		}
+	if (snapshot_id.empty()) {
+		throw TransactionException("SET TRANSACTION SNAPSHOT requires a non-empty snapshot id");
 	}
 	if (ValidChecker::IsInvalidated(*current_transaction)) {
-		throw TransactionException("Cannot join a shared transaction from an invalidated transaction");
+		throw TransactionException("Cannot set the transaction snapshot of an invalidated transaction");
+	}
+	if (current_transaction->SharedDatabase()) {
+		throw TransactionException("Cannot set the transaction snapshot: this connection already takes part in a "
+		                           "shared transaction for database %s",
+		                           current_transaction->SharedDatabase()->GetName());
 	}
 
 	auto &database_manager = DatabaseManager::Get(context);
-	auto database = database_manager.GetSharedTransactionDatabase(transaction_id);
+	auto database = database_manager.GetSharedTransactionDatabase(snapshot_id);
 	if (!database) {
-		throw TransactionException("Shared transaction is no longer available");
+		throw TransactionException("Snapshot is no longer available");
 	}
 	if (ValidChecker::IsInvalidated(*database)) {
-		throw TransactionException("Cannot join shared transaction: %s", ValidChecker::InvalidatedMessage(*database));
+		throw TransactionException("Cannot set the transaction snapshot: %s",
+		                           ValidChecker::InvalidatedMessage(*database));
 	}
 	auto &transaction_manager = database->GetTransactionManager();
 	if (!transaction_manager.IsDuckTransactionManager()) {
-		throw TransactionException("Database '%s' does not support shared transactions", database->GetName());
+		throw TransactionException("Database %s does not support transaction snapshots", database->GetName());
 	}
 	auto &duck_manager = transaction_manager.Cast<DuckTransactionManager>();
-	current_transaction->ValidateAdoption(*database);
-	context.GuardSharedTransaction(duck_manager.GetSharedTransactionLock(transaction_id));
-	auto &transaction = duck_manager.JoinTransaction(transaction_id);
-	try {
-		current_transaction->Adopt(*database, transaction);
-	} catch (...) {
-		duck_manager.CancelJoin(transaction);
-		throw;
-	}
+	// Hold the statement lock before looking the transaction up so the exporter cannot end it underneath us.
+	context.GuardSharedTransaction(duck_manager.GetSharedTransactionState(snapshot_id)->statement_lock, false);
+	auto &transaction = duck_manager.JoinTransaction(snapshot_id);
+	current_transaction->Adopt(*database, transaction);
 }
 
 idx_t TransactionContext::GetActiveQuery() {

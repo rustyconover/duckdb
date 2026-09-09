@@ -36,10 +36,10 @@ TransactionData::TransactionData(transaction_t transaction_id_p, VisibilityBound
 }
 
 DuckTransaction::DuckTransaction(DuckTransactionManager &manager, ClientContext &context_p, transaction_t start_time,
-                                 SnapshotView view_p, idx_t catalog_version_p, bool explicitly_read_only_p)
+                                 SnapshotView view_p, idx_t catalog_version_p)
     : Transaction(manager, context_p), start_time(start_time), view(view_p), commit_id(0),
-      catalog_version(catalog_version_p), awaiting_cleanup(false), explicitly_read_only(explicitly_read_only_p),
-      undo_buffer(*this, context_p), storage(make_uniq<LocalStorage>(context_p, *this)) {
+      catalog_version(catalog_version_p), awaiting_cleanup(false), undo_buffer(*this, context_p),
+      storage(make_uniq<LocalStorage>(context_p, *this)) {
 	D_ASSERT(IsCommitted(start_time) && !IsCommitted(view.transaction_id));
 }
 
@@ -48,7 +48,6 @@ SnapshotView DuckTransaction::GetSnapshotView() const {
 }
 
 DuckTransaction::~DuckTransaction() {
-	D_ASSERT(!shared_context);
 }
 
 DuckTransaction &DuckTransaction::Get(ClientContext &context, AttachedDatabase &db) {

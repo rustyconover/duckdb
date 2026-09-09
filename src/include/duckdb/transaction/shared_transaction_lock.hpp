@@ -10,33 +10,115 @@
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/condition_variable.hpp"
 
+#include <functional>
+
 namespace duckdb {
 
-//! A statement gate that can be released by a different executor thread than the one that acquired it.
+//! Statement gate of an exported transaction. The exporter's statements lock it exclusively, participants' statements
+//! lock it shared. It can be released by a different thread than the one that acquired it.
 class SharedTransactionLock {
 public:
-	bool TryLockFor(const std::chrono::milliseconds &timeout) {
+	//! Invoked every few milliseconds while waiting; throwing abandons the wait.
+	using WaitCheck = std::function<void()>;
+
+	void LockExclusive(const WaitCheck &wait_check = WaitCheck()) {
+		Acquire(true, wait_check);
+	}
+	void LockShared(const WaitCheck &wait_check = WaitCheck()) {
+		Acquire(false, wait_check);
+	}
+
+	bool TryLockExclusiveFor(const std::chrono::milliseconds &timeout) {
 		unique_lock<mutex> guard(lock);
-		if (!condition.wait_for(guard, timeout, [&]() { return !locked; })) {
+		waiting_writers++;
+		bool acquired = condition.wait_for(guard, timeout, [&]() { return CanLockExclusive(); });
+		waiting_writers--;
+		if (acquired) {
+			writer = true;
+		} else {
+			guard.unlock();
+			condition.notify_all();
+		}
+		return acquired;
+	}
+
+	bool TryLockSharedFor(const std::chrono::milliseconds &timeout) {
+		unique_lock<mutex> guard(lock);
+		if (!condition.wait_for(guard, timeout, [&]() { return CanLockShared(); })) {
 			return false;
 		}
-		locked = true;
+		readers++;
 		return true;
 	}
 
-	void Unlock() {
+	void UnlockExclusive() {
 		{
 			lock_guard<mutex> guard(lock);
-			D_ASSERT(locked);
-			locked = false;
+			D_ASSERT(writer);
+			writer = false;
 		}
-		condition.notify_one();
+		condition.notify_all();
+	}
+
+	void UnlockShared() {
+		{
+			lock_guard<mutex> guard(lock);
+			D_ASSERT(readers > 0);
+			readers--;
+		}
+		condition.notify_all();
+	}
+
+private:
+	bool CanLockExclusive() const {
+		return !writer && readers == 0;
+	}
+	//! Waiting writers take precedence so that a stream of readers cannot starve the exporter.
+	bool CanLockShared() const {
+		return !writer && waiting_writers == 0;
+	}
+	bool CanLock(bool exclusive) const {
+		return exclusive ? CanLockExclusive() : CanLockShared();
+	}
+
+	void Acquire(bool exclusive, const WaitCheck &wait_check) {
+		unique_lock<mutex> guard(lock);
+		if (exclusive) {
+			waiting_writers++;
+		}
+		try {
+			while (!CanLock(exclusive)) {
+				if (!wait_check) {
+					condition.wait(guard);
+					continue;
+				}
+				condition.wait_for(guard, std::chrono::milliseconds(10));
+				if (!CanLock(exclusive)) {
+					wait_check();
+				}
+			}
+		} catch (...) {
+			if (exclusive) {
+				waiting_writers--;
+				guard.unlock();
+				condition.notify_all();
+			}
+			throw;
+		}
+		if (exclusive) {
+			waiting_writers--;
+			writer = true;
+		} else {
+			readers++;
+		}
 	}
 
 private:
 	mutex lock;
 	condition_variable condition;
-	bool locked = false;
+	idx_t readers = 0;
+	bool writer = false;
+	idx_t waiting_writers = 0;
 };
 
 } // namespace duckdb

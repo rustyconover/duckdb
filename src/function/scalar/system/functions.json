@@ -43,12 +43,12 @@
         "struct": "CurrentTransactionId"
     },
     {
-        "name": "duckdb_share_transaction",
+        "name": "duckdb_export_snapshot",
         "parameters": "[database]",
-        "description": "Return an id for a database transaction that another in-process connection can use with JOIN TRANSACTION.",
-        "example": "duckdb_share_transaction('memory')",
+        "description": "Export the current transaction of a database so that other in-process connections can read its state with SET TRANSACTION SNAPSHOT.",
+        "example": "duckdb_export_snapshot('memory')",
         "type": "scalar_function",
-        "struct": "ShareTransactionFun"
+        "struct": "ExportSnapshotFun"
     },
     {
         "name": "current_query_id",

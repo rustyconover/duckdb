@@ -34,41 +34,20 @@ struct CommitInfo {
 	optional_ptr<CommitDropState> drop_state;
 };
 
-enum class SharedTransactionOutcome : uint8_t { PENDING, COMMITTED, ROLLED_BACK };
-
+//! State of an exported transaction. Participants keep it after the exporter has ended the transaction.
 struct SharedTransactionState {
-	atomic<SharedTransactionOutcome> outcome {SharedTransactionOutcome::PENDING};
-
-	void ReservePendingContext() {
-		lock_guard<mutex> guard(lock);
-		pending_contexts.reserve(pending_contexts.size() + 1);
-	}
-
-	bool AddPendingContext(shared_ptr<ClientContext> context) {
-		lock_guard<mutex> guard(lock);
-		if (outcome.load() != SharedTransactionOutcome::PENDING) {
-			return false;
-		}
-		pending_contexts.push_back(std::move(context));
-		return true;
-	}
-
-	void Complete(SharedTransactionOutcome result_outcome, vector<shared_ptr<ClientContext>> &result) {
-		D_ASSERT(result_outcome != SharedTransactionOutcome::PENDING);
-		lock_guard<mutex> guard(lock);
-		outcome = result_outcome;
-		result = std::move(pending_contexts);
-	}
-
-private:
-	mutex lock;
-	vector<shared_ptr<ClientContext>> pending_contexts;
+	//! Capability accepted by SET TRANSACTION SNAPSHOT.
+	string token;
+	//! Serializes the statements of every participating connection.
+	shared_ptr<SharedTransactionLock> statement_lock;
+	//! Set once the exporting connection has committed or rolled back.
+	atomic<bool> ended {false};
 };
 
 class DuckTransaction : public Transaction {
 public:
 	DuckTransaction(DuckTransactionManager &manager, ClientContext &context, transaction_t start_time,
-	                SnapshotView view, idx_t catalog_version, bool explicitly_read_only);
+	                SnapshotView view, idx_t catalog_version);
 	~DuckTransaction() override;
 
 	//! The start timestamp of this transaction
@@ -129,10 +108,6 @@ public:
 	transaction_t GetTransactionId() const {
 		return view.transaction_id;
 	}
-	bool IsExplicitlyReadOnly() const {
-		return explicitly_read_only;
-	}
-
 	unique_ptr<StorageLockKey> TryGetCheckpointLock();
 
 	//! Get a shared lock on a table
@@ -143,11 +118,7 @@ public:
 	}
 
 	bool IsShared() const {
-		return statement_lock != nullptr;
-	}
-	shared_ptr<SharedTransactionLock> GetStatementLock() const {
-		D_ASSERT(statement_lock);
-		return statement_lock;
+		return shared_state != nullptr;
 	}
 	shared_ptr<SharedTransactionState> GetSharedState() const {
 		return shared_state;
@@ -156,17 +127,7 @@ public:
 private:
 	friend class DuckTransactionManager;
 
-	//! Number of connections currently participating. Guarded by the transaction manager lock.
-	idx_t share_count = 0;
-	//! True when the originating meta transaction was started with BEGIN TRANSACTION READ ONLY.
-	bool explicitly_read_only;
-	//! Capability used to find this transaction in the manager's shared transaction container.
-	string share_token;
-	//! Any rollback vote dooms the shared transaction. Guarded by the transaction manager lock.
-	bool rollback_requested = false;
-	//! Keeps the originating context alive from export through final resolution. Guarded by the manager lock.
-	shared_ptr<ClientContext> shared_context;
-	//! Final outcome observed by participants whose commit vote completes before storage resolution.
+	//! Set once the transaction is exported. Guarded by the transaction manager lock.
 	shared_ptr<SharedTransactionState> shared_state;
 	//! The undo buffer is used to store old versions of rows that are updated
 	//! or deleted
@@ -191,8 +152,6 @@ private:
 	reference_map_t<DataTableInfo, unique_ptr<ActiveTableLock>> active_locks;
 	//! Flag to prevent auto-checkpointing inside a checkpoint transaction.
 	bool is_checkpoint_transaction = false;
-	//! Allocated when the transaction is first shared.
-	shared_ptr<SharedTransactionLock> statement_lock;
 };
 
 } // namespace duckdb

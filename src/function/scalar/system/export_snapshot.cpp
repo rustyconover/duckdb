@@ -18,28 +18,28 @@ namespace duckdb {
 
 namespace {
 
-struct ShareTransactionLocalState : FunctionLocalState {
-	explicit ShareTransactionLocalState(string transaction_id_p) : transaction_id(std::move(transaction_id_p)) {
+struct ExportSnapshotLocalState : FunctionLocalState {
+	explicit ExportSnapshotLocalState(string transaction_id_p) : transaction_id(std::move(transaction_id_p)) {
 	}
 
 	string transaction_id;
 };
 
-struct ShareTransactionBindData : FunctionData {
-	ShareTransactionBindData() : has_database(false) {
+struct ExportSnapshotBindData : FunctionData {
+	ExportSnapshotBindData() : has_database(false) {
 	}
-	explicit ShareTransactionBindData(string database_p) : has_database(true), database(std::move(database_p)) {
+	explicit ExportSnapshotBindData(string database_p) : has_database(true), database(std::move(database_p)) {
 	}
 
 	unique_ptr<FunctionData> Copy() const override {
 		if (!has_database) {
-			return make_uniq<ShareTransactionBindData>();
+			return make_uniq<ExportSnapshotBindData>();
 		}
-		return make_uniq<ShareTransactionBindData>(database);
+		return make_uniq<ExportSnapshotBindData>(database);
 	}
 
 	bool Equals(const FunctionData &other_p) const override {
-		auto &other = other_p.Cast<ShareTransactionBindData>();
+		auto &other = other_p.Cast<ExportSnapshotBindData>();
 		return has_database == other.has_database && database == other.database;
 	}
 
@@ -47,31 +47,31 @@ struct ShareTransactionBindData : FunctionData {
 	string database;
 };
 
-unique_ptr<FunctionData> ShareTransactionBind(BindScalarFunctionInput &input) {
+unique_ptr<FunctionData> ExportSnapshotBind(BindScalarFunctionInput &input) {
 	if (input.HasBinder()) {
 		input.GetBinder().GetStatementProperties().output_type = QueryResultOutputType::FORCE_MATERIALIZED;
 	}
 	auto database = input.GetConstant(0);
 	if (database.IsNull()) {
-		return make_uniq<ShareTransactionBindData>();
+		return make_uniq<ExportSnapshotBindData>();
 	}
-	return make_uniq<ShareTransactionBindData>(database.GetValue<string>());
+	return make_uniq<ExportSnapshotBindData>(database.GetValue<string>());
 }
 
-unique_ptr<FunctionLocalState> ShareTransactionInit(ExpressionState &state, const BoundFunctionExpression &,
-                                                    FunctionData *bind_data_p) {
+unique_ptr<FunctionLocalState> ExportSnapshotInit(ExpressionState &state, const BoundFunctionExpression &,
+                                                  FunctionData *bind_data_p) {
 	auto &context = state.GetContext();
 	if (!context.transaction.HasActiveTransaction() || context.transaction.IsAutoCommit()) {
-		throw TransactionException("duckdb_share_transaction() must be called inside an explicit transaction");
+		throw TransactionException("duckdb_export_snapshot() must be called inside an explicit transaction");
 	}
 	auto &meta_transaction = context.transaction.ActiveTransaction();
 	auto &database_manager = DatabaseManager::Get(context);
-	auto &bind_data = bind_data_p->Cast<ShareTransactionBindData>();
+	auto &bind_data = bind_data_p->Cast<ExportSnapshotBindData>();
 	optional_ptr<AttachedDatabase> database;
 	if (bind_data.has_database) {
 		auto named_database = database_manager.GetDatabase(context, Identifier(bind_data.database));
 		if (!named_database) {
-			throw TransactionException("duckdb_share_transaction(): database '%s' does not exist", bind_data.database);
+			throw TransactionException("duckdb_export_snapshot(): database %s does not exist", bind_data.database);
 		}
 		database = named_database.get();
 	} else {
@@ -86,8 +86,7 @@ unique_ptr<FunctionLocalState> ShareTransactionInit(ExpressionState &state, cons
 					continue;
 				}
 				if (database) {
-					throw TransactionException(
-					    "duckdb_share_transaction(): database is ambiguous; pass a database name");
+					throw TransactionException("duckdb_export_snapshot(): database is ambiguous; pass a database name");
 				}
 				database = &candidate;
 			}
@@ -97,39 +96,45 @@ unique_ptr<FunctionLocalState> ShareTransactionInit(ExpressionState &state, cons
 		auto name = database_manager.GetDefaultDatabase(context);
 		auto default_database = database_manager.GetDatabase(context, name);
 		if (!default_database) {
-			throw TransactionException("duckdb_share_transaction(): default database '%s' does not exist", name);
+			throw TransactionException("duckdb_export_snapshot(): default database %s does not exist", name);
 		}
 		database = default_database.get();
 	}
-	meta_transaction.ValidateSharedTransaction(*database);
+	if (database->IsSystem() || database->IsTemporary()) {
+		throw TransactionException("duckdb_export_snapshot(): database %s cannot be exported", database->GetName());
+	}
+	meta_transaction.ValidateShare(*database);
 	auto &transaction = meta_transaction.GetTransaction(*database);
 	if (!transaction.IsDuckTransaction()) {
-		throw TransactionException("Database '%s' does not support shared transactions", database->GetName());
+		throw TransactionException("Database %s does not support transaction snapshots", database->GetName());
 	}
 	auto &duck_transaction = transaction.Cast<DuckTransaction>();
-	shared_ptr<SharedTransactionLock> statement_lock;
-	if (duck_transaction.IsShared()) {
-		statement_lock = duck_transaction.GetStatementLock();
-	} else {
-		statement_lock = make_shared_ptr<SharedTransactionLock>();
-		context.GuardSharedTransaction(statement_lock);
+	bool newly_shared;
+	auto shared_state = duck_transaction.GetTransactionManager().ShareTransaction(duck_transaction, newly_shared);
+	if (newly_shared) {
+		// The manager pre-locked the statement lock for this statement; hand it to the active query.
+		try {
+			meta_transaction.SetSharedTransaction(*database, shared_state);
+			context.AdoptSharedTransactionGuard(shared_state->statement_lock);
+		} catch (...) {
+			shared_state->statement_lock->UnlockExclusive();
+			throw;
+		}
 	}
-	auto token = duck_transaction.GetTransactionManager().ShareTransaction(duck_transaction, std::move(statement_lock));
-	meta_transaction.SetSharedTransaction(*database, duck_transaction);
-	return make_uniq<ShareTransactionLocalState>(std::move(token));
+	return make_uniq<ExportSnapshotLocalState>(shared_state->token);
 }
 
-void ShareTransactionFunction(DataChunk &input, ExpressionState &state, Vector &result) {
-	auto &data = ExecuteFunctionState::GetFunctionState(state)->Cast<ShareTransactionLocalState>();
+void ExportSnapshotFunction(DataChunk &input, ExpressionState &state, Vector &result) {
+	auto &data = ExecuteFunctionState::GetFunctionState(state)->Cast<ExportSnapshotLocalState>();
 	result.Reference(Value(data.transaction_id), count_t(input.size()));
 }
 
 } // namespace
 
-ScalarFunction ShareTransactionFun::GetFunction() {
+ScalarFunction ExportSnapshotFun::GetFunction() {
 	ScalarFunction function({FunctionParameter("database", LogicalType::VARCHAR, Value(LogicalTypeId::SQLNULL))},
-	                        LogicalType::VARCHAR, ShareTransactionFunction, ShareTransactionBind, nullptr,
-	                        ShareTransactionInit);
+	                        LogicalType::VARCHAR, ExportSnapshotFunction, ExportSnapshotBind, nullptr,
+	                        ExportSnapshotInit);
 	function.SetVolatile();
 	function.SetFallible();
 	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);

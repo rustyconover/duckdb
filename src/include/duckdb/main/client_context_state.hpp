@@ -48,8 +48,6 @@ public:
 	}
 	virtual void TransactionBegin(MetaTransaction &transaction, ClientContext &context) {
 	}
-	//! Shared-transaction completion can deliver these hooks after a later transaction has begun. Consumers must use
-	//! the supplied transaction rather than assume it is the context's current transaction.
 	virtual void TransactionCommit(MetaTransaction &transaction, ClientContext &context) {
 	}
 	virtual void TransactionRollback(MetaTransaction &transaction, ClientContext &context) {

@@ -16,7 +16,7 @@
 namespace duckdb {
 class DuckTransactionManager;
 class DuckTransaction;
-class SharedTransactionLock;
+struct SharedTransactionState;
 struct UndoBufferProperties;
 
 //! CleanupInfo collects transactions awaiting cleanup.
@@ -42,16 +42,14 @@ public:
 
 	//! Start a new transaction
 	Transaction &StartTransaction(ClientContext &context) override;
-	//! Export an active transaction and return its capability.
-	string ShareTransaction(DuckTransaction &transaction, shared_ptr<SharedTransactionLock> statement_lock);
-	//! Pin the statement lock before registering a participant.
-	shared_ptr<SharedTransactionLock> GetSharedTransactionLock(const string &token);
-	//! Import an explicitly shared transaction and register a new participant.
+	//! Export an active transaction. The first export creates the shared state and pre-locks its statement lock.
+	shared_ptr<SharedTransactionState> ShareTransaction(DuckTransaction &transaction, bool &newly_shared);
+	//! Look up the shared state of an exported transaction by its token.
+	shared_ptr<SharedTransactionState> GetSharedTransactionState(const string &token);
+	//! Look up an exported transaction so that another connection can participate in it.
 	DuckTransaction &JoinTransaction(const string &token);
-	//! Undo a participant registration when adoption fails.
-	void CancelJoin(DuckTransaction &transaction);
-	//! Reject statements once any participant has voted to roll back.
-	void ValidateSharedTransaction(DuckTransaction &transaction);
+	//! End an exported transaction: participants can no longer use it and the token is retired.
+	void EndSharedTransaction(DuckTransaction &transaction);
 	//! Commit the given transaction
 	ErrorData CommitTransaction(ClientContext &context, Transaction &transaction) override;
 	//! Rollback the given transaction
@@ -106,11 +104,6 @@ protected:
 	};
 
 private:
-	ErrorData CommitTransactionInternal(ClientContext &context, DuckTransaction &transaction,
-	                                    shared_ptr<ClientContext> &released_context);
-	void RollbackTransactionInternal(DuckTransaction &transaction, shared_ptr<ClientContext> &released_context);
-	void RemoveSharedTransaction(DuckTransaction &transaction);
-
 	//! Generates a new commit timestamp
 	transaction_t GetCommitTimestamp();
 	//! Allocates the cleanup info, and reserves the space RemoveTransaction needs to re-home a transaction.
@@ -160,7 +153,7 @@ private:
 	vector<unique_ptr<DuckTransaction>> active_transactions;
 	//! Set of recently committed transactions
 	vector<unique_ptr<DuckTransaction>> recently_committed_transactions;
-	//! Capability lookup for explicitly shared transactions. active_transactions owns every entry.
+	//! Token lookup for exported transactions. active_transactions owns every entry.
 	unordered_map<string, reference<DuckTransaction>> shared_transactions;
 	//! The lock used for transaction operations
 	mutex transaction_lock;

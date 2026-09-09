@@ -96,7 +96,7 @@ SQLStatement:
     - TransactionStatement
     - BeginTransaction
     - CommitTransaction
-    - JoinTransaction
+    - SetTransactionSnapshot
     - RollbackTransaction
     - TriggerBody
     - UpdateStatement

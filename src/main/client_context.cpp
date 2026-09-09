@@ -97,18 +97,37 @@ public:
 	unique_ptr<Executor> executor;
 	//! The progress bar
 	unique_ptr<ProgressBar> progress_bar;
-	//! Pins and holds a DuckTransaction's statement lock for this query.
+	//! Holds a shared transaction's statement lock for the duration of this query.
 	struct StatementGuard {
-		StatementGuard(shared_ptr<SharedTransactionLock> lock_p, ClientContext &context) : lock(std::move(lock_p)) {
-			while (!lock->TryLockFor(milliseconds(10))) {
+		struct AdoptExclusiveLock {};
+
+		//! Acquire the lock, checking for interrupts and the query deadline while waiting.
+		StatementGuard(shared_ptr<SharedTransactionLock> lock_p, bool exclusive_p, ClientContext &context)
+		    : lock(std::move(lock_p)), exclusive(exclusive_p) {
+			auto wait_check = [&context]() {
 				context.InterruptCheck();
+				context.CheckQueryDeadline();
+			};
+			if (exclusive) {
+				lock->LockExclusive(wait_check);
+			} else {
+				lock->LockShared(wait_check);
 			}
 		}
+		//! Take over an exclusive lock that the caller already holds.
+		StatementGuard(shared_ptr<SharedTransactionLock> lock_p, AdoptExclusiveLock)
+		    : lock(std::move(lock_p)), exclusive(true) {
+		}
 		~StatementGuard() {
-			lock->Unlock();
+			if (exclusive) {
+				lock->UnlockExclusive();
+			} else {
+				lock->UnlockShared();
+			}
 		}
 
 		shared_ptr<SharedTransactionLock> lock;
+		bool exclusive;
 	};
 	unique_ptr<StatementGuard> statement_guard;
 
@@ -154,11 +173,11 @@ struct DebugClientContextState : public ClientContextState {
 		if (Exception::UncaughtException()) {
 			return;
 		}
-		D_ASSERT(active_transactions.empty());
+		D_ASSERT(!active_transaction);
 		D_ASSERT(!active_query);
 	}
 
-	unordered_set<transaction_t> active_transactions;
+	bool active_transaction = false;
 	bool active_query = false;
 
 	void QueryBegin(ClientContext &context) override {
@@ -174,20 +193,24 @@ struct DebugClientContextState : public ClientContextState {
 		active_query = false;
 	}
 	void TransactionBegin(MetaTransaction &transaction, ClientContext &context) override {
-		if (!active_transactions.insert(transaction.global_transaction_id).second) {
-			throw InternalException("DebugClientContextState::TransactionBegin called twice for a transaction");
+		if (active_transaction) {
+			throw InternalException(
+			    "DebugClientContextState::TransactionBegin called when a transaction is already active");
 		}
+		active_transaction = true;
 	}
 	void TransactionCommit(MetaTransaction &transaction, ClientContext &context) override {
-		if (active_transactions.erase(transaction.global_transaction_id) != 1) {
+		if (!active_transaction) {
 			throw InternalException("DebugClientContextState::TransactionCommit called when no transaction is active");
 		}
+		active_transaction = false;
 	}
 	void TransactionRollback(MetaTransaction &transaction, ClientContext &context) override {
-		if (active_transactions.erase(transaction.global_transaction_id) != 1) {
+		if (!active_transaction) {
 			throw InternalException(
 			    "DebugClientContextState::TransactionRollback called when no transaction is active");
 		}
+		active_transaction = false;
 	}
 #ifdef DUCKDB_DEBUG_REBIND
 	RebindQueryInfo OnPlanningError(ClientContext &context, SQLStatement &statement, ErrorData &error) override {
@@ -287,34 +310,38 @@ void ClientContext::Destroy() {
 	if (transaction.HasActiveTransaction()) {
 		transaction.ResetActiveQuery();
 		if (!transaction.IsAutoCommit()) {
+			// An exporter waits for in-flight participant statements before it rolls the shared transaction back.
+			unique_ptr<ActiveQueryContext::StatementGuard> statement_guard;
+			auto &meta_transaction = transaction.ActiveTransaction();
+			auto shared_state = meta_transaction.GetSharedTransactionState();
+			if (shared_state && !meta_transaction.IsSharedParticipant() &&
+			    !(active_query && active_query->statement_guard)) {
+				shared_state->statement_lock->LockExclusive();
+				statement_guard = make_uniq<ActiveQueryContext::StatementGuard>(
+				    shared_state->statement_lock, ActiveQueryContext::StatementGuard::AdoptExclusiveLock());
+			}
 			transaction.Rollback(nullptr);
 		}
 	}
 	CleanupInternal(*lock);
 }
 
-void ClientContext::AddSharedTransactionPin() {
-	shared_transaction_pins.fetch_add(1);
-}
-
-void ClientContext::RemoveSharedTransactionPin() {
-	auto previous_count = shared_transaction_pins.fetch_sub(1);
-	D_ASSERT(previous_count > 0);
-}
-
-void ClientContext::DestroyIfSharedTransactionPinned() {
-	if (shared_transaction_pins.load() > 0) {
-		Destroy();
-	}
-}
-
-void ClientContext::GuardSharedTransaction(shared_ptr<SharedTransactionLock> statement_lock) {
+void ClientContext::GuardSharedTransaction(shared_ptr<SharedTransactionLock> statement_lock, bool exclusive) {
 	D_ASSERT(active_query);
 	if (active_query->statement_guard) {
 		D_ASSERT(active_query->statement_guard->lock == statement_lock);
+		D_ASSERT(active_query->statement_guard->exclusive || !exclusive);
 		return;
 	}
-	active_query->statement_guard = make_uniq<ActiveQueryContext::StatementGuard>(std::move(statement_lock), *this);
+	active_query->statement_guard =
+	    make_uniq<ActiveQueryContext::StatementGuard>(std::move(statement_lock), exclusive, *this);
+}
+
+void ClientContext::AdoptSharedTransactionGuard(shared_ptr<SharedTransactionLock> statement_lock) {
+	D_ASSERT(active_query);
+	D_ASSERT(!active_query->statement_guard);
+	active_query->statement_guard = make_uniq<ActiveQueryContext::StatementGuard>(
+	    std::move(statement_lock), ActiveQueryContext::StatementGuard::AdoptExclusiveLock());
 }
 
 void ClientContext::ProcessError(ErrorData &error, const string &query) const {
@@ -339,30 +366,6 @@ void ClientContext::BeginQueryInternal(ClientContextLock &lock, const SQLStateme
 	if (ValidChecker::IsInvalidated(db_inst)) {
 		throw ErrorManager::InvalidatedDatabase(*this, ValidChecker::InvalidatedMessage(db_inst));
 	}
-	transaction.FinalizePendingTransactions();
-	if (transaction.IsAutoCommit()) {
-		transaction.BeginTransaction();
-	}
-
-	// Lock the shared DuckTransaction for the query duration.
-	auto &meta_transaction = transaction.ActiveTransaction();
-	auto shared_transaction = meta_transaction.SharedTransaction();
-	unique_ptr<ActiveQueryContext::StatementGuard> statement_guard;
-	if (shared_transaction) {
-		statement_guard = make_uniq<ActiveQueryContext::StatementGuard>(shared_transaction->GetStatementLock(), *this);
-		if (statement.type != StatementType::TRANSACTION_STATEMENT) {
-			shared_transaction->GetTransactionManager().ValidateSharedTransaction(*shared_transaction);
-		}
-	}
-	active_query = make_uniq<ActiveQueryContext>();
-	active_query->statement_guard = std::move(statement_guard);
-
-	transaction.SetActiveQuery(db->GetDatabaseManager().GetNewQueryNumber());
-	auto &query = statement.query;
-	LogQueryInternal(lock, query);
-	active_query->query = query;
-
-	query_progress.Initialize();
 	// Set query deadline if max_execution_time is configured
 	auto max_execution_time = Settings::Get<MaxExecutionTimeSetting>(*this);
 	if (max_execution_time > 0) {
@@ -372,6 +375,36 @@ void ClientContext::BeginQueryInternal(ClientContextLock &lock, const SQLStateme
 	} else {
 		query_deadline.SetInvalid();
 	}
+
+	// Serialize the statements of a shared transaction and reject them once the exporter has ended it.
+	// This runs before the query is registered so that a failure here leaves nothing to clean up.
+	unique_ptr<ActiveQueryContext::StatementGuard> statement_guard;
+	if (transaction.HasActiveTransaction()) {
+		auto &meta_transaction = transaction.ActiveTransaction();
+		auto shared_state = meta_transaction.GetSharedTransactionState();
+		if (shared_state) {
+			// The exporter's statements exclude everyone; participants only read and may run concurrently.
+			statement_guard = make_uniq<ActiveQueryContext::StatementGuard>(
+			    shared_state->statement_lock, !meta_transaction.IsSharedParticipant(), *this);
+			if (statement.type != StatementType::TRANSACTION_STATEMENT && shared_state->ended.load()) {
+				throw TransactionException("Shared transaction has ended: the exporting connection has committed or "
+				                           "rolled back. COMMIT or ROLLBACK detaches from it");
+			}
+		}
+	}
+
+	active_query = make_uniq<ActiveQueryContext>();
+	active_query->statement_guard = std::move(statement_guard);
+	if (transaction.IsAutoCommit()) {
+		transaction.BeginTransaction();
+	}
+
+	transaction.SetActiveQuery(db->GetDatabaseManager().GetNewQueryNumber());
+	auto &query = statement.query;
+	LogQueryInternal(lock, query);
+	active_query->query = query;
+
+	query_progress.Initialize();
 	// Notify any registered state of query begin
 	for (auto &state : registered_state->States()) {
 		state->QueryBegin(*this);
@@ -1402,6 +1435,16 @@ void ClientContext::InterruptCheck() const {
 	}
 }
 
+void ClientContext::CheckQueryDeadline() const {
+	if (!query_deadline.IsValid()) {
+		return;
+	}
+	auto now = NumericCast<idx_t>(duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
+	if (now >= query_deadline.GetIndex()) {
+		throw InterruptException("Query exceeded maximum execution time");
+	}
+}
+
 void ClientContext::CancelTransaction() {
 	auto lock = LockContext();
 	InitialCleanup(*lock);
@@ -1451,6 +1494,25 @@ void ClientContext::RunFunctionInTransactionInternal(ClientContextLock &lock, co
 		D_ASSERT(!active_query);
 		transaction.BeginTransaction();
 		interrupt_state = ClientInterruptState::NOT_INTERRUPTED;
+	}
+
+	unique_ptr<ActiveQueryContext::StatementGuard> statement_guard;
+	if (transaction.HasActiveTransaction()) {
+		auto &meta_transaction = transaction.ActiveTransaction();
+		auto shared_state = meta_transaction.GetSharedTransactionState();
+		if (shared_state) {
+			bool exclusive = !meta_transaction.IsSharedParticipant();
+			if (active_query) {
+				GuardSharedTransaction(shared_state->statement_lock, exclusive);
+			} else {
+				statement_guard =
+				    make_uniq<ActiveQueryContext::StatementGuard>(shared_state->statement_lock, exclusive, *this);
+			}
+			if (shared_state->ended.load()) {
+				throw TransactionException("Shared transaction has ended: the exporting connection has committed or "
+				                           "rolled back. COMMIT or ROLLBACK detaches from it");
+			}
+		}
 	}
 	try {
 		fun();

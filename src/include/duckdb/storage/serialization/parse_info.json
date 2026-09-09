@@ -870,7 +870,7 @@
       },
       {
         "id": 204,
-        "name": "transaction_id",
+        "name": "snapshot_id",
         "type": "string",
         "default": "string()"
       }
