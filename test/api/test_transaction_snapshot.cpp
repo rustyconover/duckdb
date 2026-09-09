@@ -878,3 +878,47 @@ TEST_CASE("A participant statement still uses intra-query parallelism", "[api][t
 	REQUIRE_NO_FAIL(joiner.Query("ROLLBACK"));
 	REQUIRE_NO_FAIL(owner.Query("COMMIT"));
 }
+
+TEST_CASE("A rollback outside a statement waits for participants", "[api][transaction_snapshot]") {
+	// Owner rollbacks do not all happen inside a statement. Automatic rollback of a failed statement runs from
+	// ClientContext::Query after EndQueryInternal has released that query's guard, and connection teardown runs
+	// with no active query at all. Such a rollback must take the gate itself, or it can destroy the transaction
+	// underneath a participant that is mid-read. This drives that path directly.
+	DuckDB database(nullptr);
+	Connection setup(database);
+	Connection owner(database);
+	Connection joiner(database);
+	auto capture = make_shared_ptr<CaptureTransactionState>();
+	RegisterCaptureTransactionFunction(setup, capture);
+	REQUIRE_NO_FAIL(setup.Query("CREATE TABLE shared_values (value INTEGER)"));
+	REQUIRE_NO_FAIL(setup.Query("INSERT INTO shared_values VALUES (1)"));
+
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	REQUIRE_NO_FAIL(owner.Query("INSERT INTO shared_values VALUES (2)"));
+	SetTransactionSnapshot(joiner, ExportSnapshot(owner));
+
+	// The participant holds the gate shared for as long as its statement runs.
+	unique_ptr<QueryResult> joiner_result;
+	std::thread joiner_thread([&]() {
+		joiner_result = joiner.Query("SELECT capture_shared_transaction(CAST(value AS VARCHAR)) FROM shared_values");
+	});
+	REQUIRE(WaitForCapture(capture));
+
+	atomic<bool> rollback_finished {false};
+	std::thread rollback_thread([&]() {
+		owner.context->transaction.Rollback(nullptr);
+		rollback_finished = true;
+	});
+	std::this_thread::sleep_for(std::chrono::milliseconds(150));
+	// It must still be waiting for the participant rather than tearing the transaction down.
+	REQUIRE(!rollback_finished.load());
+	ReleaseCapture(capture);
+	joiner_thread.join();
+	rollback_thread.join();
+	REQUIRE(rollback_finished.load());
+	REQUIRE_NO_FAIL(*joiner_result);
+
+	REQUIRE_NO_FAIL(joiner.Query("ROLLBACK"));
+	auto result = setup.Query("SELECT value FROM shared_values");
+	REQUIRE(CHECK_COLUMN(result, 0, {1}));
+}

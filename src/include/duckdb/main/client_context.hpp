@@ -59,6 +59,17 @@ struct ClientData;
 class ClientContextState;
 class RegisteredStateManager;
 class SharedTransactionLock;
+class MetaTransaction;
+
+//! Holds an exported transaction's gate exclusively for as long as it is alive.
+class SharedTransactionGate {
+public:
+	explicit SharedTransactionGate(shared_ptr<SharedTransactionLock> lock_p);
+	~SharedTransactionGate();
+
+private:
+	shared_ptr<SharedTransactionLock> lock;
+};
 
 //! How a query takes hold of an exported transaction's statement lock.
 enum class SharedTransactionGuardMode : uint8_t {
@@ -195,6 +206,10 @@ public:
 	DUCKDB_API void Destroy();
 	//! Hold an exported transaction's statement lock for the active query, including an open streaming result.
 	void GuardSharedTransaction(shared_ptr<SharedTransactionLock> statement_lock, SharedTransactionGuardMode mode);
+	//! Hold the gate across a commit or rollback that can destroy an exported transaction, so it is never torn
+	//! down underneath a participant. Returns nothing when there is nothing to guard: the transaction is not
+	//! exported, this connection only reads it, or the running query already holds the gate.
+	unique_ptr<SharedTransactionGate> LockSharedTransactionForFinalize(MetaTransaction &meta_transaction);
 
 	//! Get the table info of a specific table, or nullptr if it cannot be found.
 	DUCKDB_API unique_ptr<TableDescription> TableInfo(const Identifier &database_name, const Identifier &schema_name,

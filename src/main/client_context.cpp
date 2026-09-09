@@ -316,20 +316,34 @@ void ClientContext::Destroy() {
 	if (transaction.HasActiveTransaction()) {
 		transaction.ResetActiveQuery();
 		if (!transaction.IsAutoCommit()) {
-			// An exporter waits for in-flight participant statements before it rolls the shared transaction back.
-			unique_ptr<ActiveQueryContext::StatementGuard> statement_guard;
-			auto &meta_transaction = transaction.ActiveTransaction();
-			auto shared_state = meta_transaction.GetSharedTransactionState();
-			if (shared_state && !meta_transaction.IsSharedParticipant() &&
-			    !(active_query && active_query->statement_guard)) {
-				shared_state->statement_lock->LockExclusive();
-				statement_guard = make_uniq<ActiveQueryContext::StatementGuard>(
-				    shared_state->statement_lock, SharedTransactionGuardMode::ADOPT_EXCLUSIVE, *this);
-			}
 			transaction.Rollback(nullptr);
 		}
 	}
 	CleanupInternal(*lock);
+}
+
+SharedTransactionGate::SharedTransactionGate(shared_ptr<SharedTransactionLock> lock_p) : lock(std::move(lock_p)) {
+	lock->LockExclusive();
+}
+
+SharedTransactionGate::~SharedTransactionGate() {
+	lock->UnlockExclusive();
+}
+
+unique_ptr<SharedTransactionGate> ClientContext::LockSharedTransactionForFinalize(MetaTransaction &meta_transaction) {
+	if (meta_transaction.IsSharedParticipant()) {
+		// A participant only detaches; it never ends the transaction, and it may already hold the gate shared.
+		return nullptr;
+	}
+	auto shared_state = meta_transaction.GetSharedTransactionState();
+	if (!shared_state) {
+		return nullptr;
+	}
+	if (active_query && active_query->statement_guard) {
+		// This runs inside a statement that already holds the gate, such as an explicit ROLLBACK.
+		return nullptr;
+	}
+	return make_uniq<SharedTransactionGate>(shared_state->statement_lock);
 }
 
 void ClientContext::GuardSharedTransaction(shared_ptr<SharedTransactionLock> statement_lock,

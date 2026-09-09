@@ -23,15 +23,6 @@ TransactionContext::TransactionContext(ClientContext &context)
 
 TransactionContext::~TransactionContext() {
 	if (current_transaction) {
-		// An exporter waits for in-flight participant statements before its transaction goes away. This path is
-		// reached when the context is destroyed during exception unwinding, which skips ClientContext::Destroy.
-		shared_ptr<SharedTransactionState> shared_state;
-		if (!current_transaction->IsSharedParticipant()) {
-			shared_state = current_transaction->GetSharedTransactionState();
-		}
-		if (shared_state) {
-			shared_state->statement_lock->LockExclusive();
-		}
 		try {
 			Rollback(nullptr);
 		} catch (std::exception &ex) {
@@ -41,9 +32,6 @@ TransactionContext::~TransactionContext() {
 			} catch (...) { // NOLINT
 			}
 		} catch (...) { // NOLINT
-		}
-		if (shared_state) {
-			shared_state->statement_lock->UnlockExclusive();
 		}
 	}
 }
@@ -79,6 +67,8 @@ void TransactionContext::Commit() {
 		throw TransactionException("failed to commit: no transaction active");
 	}
 	autocheckpoint_error = ErrorData();
+	// Hold the gate across the commit: it can end an exported transaction, and no participant may be reading it.
+	auto gate = context.LockSharedTransactionForFinalize(*current_transaction);
 	auto transaction = std::move(current_transaction);
 	ClearTransaction();
 	auto error = transaction->Commit();
@@ -119,6 +109,9 @@ void TransactionContext::Rollback(optional_ptr<ErrorData> error) {
 	if (!current_transaction) {
 		throw TransactionException("failed to rollback: no transaction active");
 	}
+	// Hold the gate across the rollback: it can end an exported transaction, and no participant may be reading it.
+	// Automatic rollback of a failed statement reaches this after the query released its own guard.
+	auto gate = context.LockSharedTransactionForFinalize(*current_transaction);
 	auto transaction = std::move(current_transaction);
 	ClearTransaction();
 	context.client_data->profiler->Reset();
