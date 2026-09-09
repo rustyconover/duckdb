@@ -15,6 +15,10 @@
 
 using namespace duckdb;
 
+// Every case here needs something a .test file cannot express: a snapshot token travelling between
+// connections, concurrent statements, a connection being destroyed, or the C++ transaction API.
+// Single-connection validation lives in test/sql/transactions/transaction_snapshot_validation.test.
+
 static string ExportSnapshot(Connection &connection) {
 	auto result = connection.Query("SELECT duckdb_export_snapshot()");
 	REQUIRE_NO_FAIL(*result);
@@ -393,29 +397,6 @@ TEST_CASE("Shared transactions use an explicit database boundary", "[api][transa
 	REQUIRE_NO_FAIL(owner.Query("ROLLBACK"));
 	result = setup.Query("SELECT count(*) FROM database_b.main.values_table");
 	REQUIRE(CHECK_COLUMN(result, 0, {0}));
-
-	// Sharing a database the exporter only reads is allowed.
-	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
-	REQUIRE_NO_FAIL(owner.Query("INSERT INTO database_b.main.values_table VALUES (84)"));
-	REQUIRE_NO_FAIL(owner.Query("SELECT duckdb_export_snapshot('database_a')"));
-	REQUIRE_NO_FAIL(owner.Query("ROLLBACK"));
-
-	Connection ambiguous(database);
-	REQUIRE_NO_FAIL(ambiguous.Query("BEGIN"));
-	REQUIRE_NO_FAIL(ambiguous.Query("SELECT * FROM database_a.main.values_table"));
-	REQUIRE_NO_FAIL(ambiguous.Query("SELECT * FROM database_b.main.values_table"));
-	REQUIRE_FAIL(ambiguous.Query("SELECT duckdb_export_snapshot()"));
-	REQUIRE_NO_FAIL(ambiguous.Query("ROLLBACK"));
-}
-
-TEST_CASE("Temporary and system databases cannot be shared", "[api][transaction_snapshot]") {
-	DuckDB database(nullptr);
-	Connection owner(database);
-	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
-	REQUIRE_NO_FAIL(owner.Query("CREATE TEMP TABLE temp_values (value INTEGER)"));
-	REQUIRE_FAIL(owner.Query("SELECT duckdb_export_snapshot('temp')"));
-	REQUIRE_FAIL(owner.Query("SELECT duckdb_export_snapshot('system')"));
-	REQUIRE_NO_FAIL(owner.Query("ROLLBACK"));
 }
 
 TEST_CASE("Sharing occurs when the function executes", "[api][transaction_snapshot]") {
