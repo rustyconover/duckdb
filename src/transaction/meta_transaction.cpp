@@ -54,7 +54,7 @@ optional_ptr<Transaction> MetaTransaction::TryGetTransaction(AttachedDatabase &d
 	if (entry == transactions.end()) {
 		return nullptr;
 	}
-	if (entry->second.participant && shared.state->ended.load()) {
+	if (entry->second.borrowed && shared.state->ended.load()) {
 		// The exporter has ended the transaction; the object may be gone.
 		return nullptr;
 	}
@@ -84,12 +84,12 @@ Transaction &MetaTransaction::GetTransaction(AttachedDatabase &db) {
 
 		return new_transaction;
 	} else {
-		if (entry->second.participant && shared.state->ended.load()) {
+		if (entry->second.borrowed && shared.state->ended.load()) {
 			throw TransactionException("Shared transaction has ended: the exporting connection has committed or "
 			                           "rolled back. COMMIT or ROLLBACK detaches from it");
 		}
 		auto &transaction = entry->second.transaction;
-		D_ASSERT(entry->second.participant ||
+		D_ASSERT(entry->second.borrowed ||
 		         (transaction.IsDuckTransaction() && transaction.Cast<DuckTransaction>().IsShared()) ||
 		         transaction.active_query == active_query);
 		return transaction;
@@ -214,8 +214,8 @@ ErrorData MetaTransaction::Commit() {
 
 		auto &transaction_manager = db.GetTransactionManager();
 		auto &transaction_ref = entry->second;
-		if (transaction_ref.participant) {
-			// A participant only reads: the exporting connection decides the outcome of the shared transaction.
+		if (transaction_ref.borrowed) {
+			// We only read this transaction: its owner decides whether it commits.
 			transaction_ref.state = TransactionState::COMMITTED;
 			continue;
 		}
@@ -255,8 +255,8 @@ void MetaTransaction::Rollback() {
 		auto entry = transactions.find(db);
 		D_ASSERT(entry != transactions.end());
 		auto &transaction_ref = entry->second;
-		if (transaction_ref.participant) {
-			// A participant only reads: the exporting connection decides the outcome of the shared transaction.
+		if (transaction_ref.borrowed) {
+			// We only read this transaction: its owner decides whether it rolls back.
 			transaction_ref.state = TransactionState::ROLLED_BACK;
 			continue;
 		}
@@ -297,7 +297,8 @@ void MetaTransaction::SetActiveQuery(transaction_t query_number) {
 	lock_guard<mutex> guard(lock);
 	active_query = query_number;
 	for (auto &entry : transactions) {
-		if (entry.second.participant) {
+		if (entry.second.borrowed) {
+			// Only the owning connection stamps its query number onto a transaction.
 			continue;
 		}
 		entry.second.transaction.active_query = query_number;

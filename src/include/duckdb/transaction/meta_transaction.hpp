@@ -30,14 +30,15 @@ struct SharedTransactionState;
 enum class TransactionState { UNCOMMITTED, COMMITTED, ROLLED_BACK };
 
 struct TransactionReference {
-	explicit TransactionReference(Transaction &transaction_p, bool participant_p = false)
-	    : state(TransactionState::UNCOMMITTED), transaction(transaction_p), participant(participant_p) {
+	explicit TransactionReference(Transaction &transaction_p, bool borrowed_p = false)
+	    : state(TransactionState::UNCOMMITTED), transaction(transaction_p), borrowed(borrowed_p) {
 	}
 
 	TransactionState state;
 	Transaction &transaction;
-	//! True when another connection exported this transaction: it is never committed or rolled back from here.
-	bool participant;
+	//! True when this transaction belongs to another connection, which exported it as a snapshot. This one only
+	//! reads it: it never starts, commits, rolls back, or otherwise controls the lifetime of a borrowed transaction.
+	bool borrowed;
 };
 
 //! The MetaTransaction manages multiple transactions for different attached databases
