@@ -16,6 +16,7 @@
 namespace duckdb {
 class DuckTransactionManager;
 class DuckTransaction;
+class SharedTransactionLock;
 struct UndoBufferProperties;
 
 //! CleanupInfo collects transactions awaiting cleanup.
@@ -42,9 +43,9 @@ public:
 	//! Start a new transaction
 	Transaction &StartTransaction(ClientContext &context) override;
 	//! Export an active transaction and return its capability.
-	string ShareTransaction(DuckTransaction &transaction, shared_ptr<std::timed_mutex> statement_lock);
+	string ShareTransaction(DuckTransaction &transaction, shared_ptr<SharedTransactionLock> statement_lock);
 	//! Pin the statement lock before registering a participant.
-	shared_ptr<std::timed_mutex> GetSharedTransactionLock(const string &token);
+	shared_ptr<SharedTransactionLock> GetSharedTransactionLock(const string &token);
 	//! Import an explicitly shared transaction and register a new participant.
 	DuckTransaction &JoinTransaction(const string &token);
 	//! Undo a participant registration when adoption fails.

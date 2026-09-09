@@ -367,6 +367,33 @@ struct ConnectionSecretState : public ClientContextState {
 		last_modifiers[name] = transaction.global_transaction_id;
 	}
 
+	void FoldUndoEntry(transaction_t transaction_id, const Identifier &name, UndoEntry &undo_entry) {
+		auto modifier = last_modifiers.find(name);
+		if (modifier == last_modifiers.end()) {
+			return;
+		}
+		auto later_transaction_id = modifier->second;
+		while (later_transaction_id != transaction_id) {
+			auto later_log = undo_logs.find(later_transaction_id);
+			if (later_log == undo_logs.end()) {
+				return;
+			}
+			auto later_entry = later_log->second.find(name);
+			if (later_entry == later_log->second.end() || !later_entry->second.had_previous_modifier) {
+				return;
+			}
+			auto previous_modifier = later_entry->second.previous_modifier;
+			if (previous_modifier == transaction_id) {
+				later_entry->second.secret = std::move(undo_entry.secret);
+				later_entry->second.previous_modifier = undo_entry.previous_modifier;
+				later_entry->second.had_previous_modifier = undo_entry.had_previous_modifier;
+				return;
+			}
+			D_ASSERT(previous_modifier != later_transaction_id);
+			later_transaction_id = previous_modifier;
+		}
+	}
+
 	void TransactionCommit(MetaTransaction &transaction, ClientContext &context) override {
 		lock_guard<mutex> guard(lock);
 		undo_logs.erase(transaction.global_transaction_id);
@@ -382,6 +409,7 @@ struct ConnectionSecretState : public ClientContextState {
 		for (auto &entry : undo_log) {
 			auto modifier = last_modifiers.find(entry.first);
 			if (modifier == last_modifiers.end() || modifier->second != transaction.global_transaction_id) {
+				FoldUndoEntry(transaction.global_transaction_id, entry.first, entry.second);
 				continue;
 			}
 			if (entry.second.secret) {

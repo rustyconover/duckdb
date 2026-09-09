@@ -125,7 +125,7 @@ Transaction &DuckTransactionManager::StartTransaction(ClientContext &context) {
 }
 
 string DuckTransactionManager::ShareTransaction(DuckTransaction &transaction,
-                                                shared_ptr<std::timed_mutex> statement_lock) {
+                                                shared_ptr<SharedTransactionLock> statement_lock) {
 	lock_guard<mutex> lock(transaction_lock);
 	if (transaction.share_count > 0) {
 		return transaction.share_token;
@@ -168,7 +168,7 @@ string DuckTransactionManager::ShareTransaction(DuckTransaction &transaction,
 	throw TransactionException("Cannot share a transaction that is no longer active");
 }
 
-shared_ptr<std::timed_mutex> DuckTransactionManager::GetSharedTransactionLock(const string &token) {
+shared_ptr<SharedTransactionLock> DuckTransactionManager::GetSharedTransactionLock(const string &token) {
 	lock_guard<mutex> lock(transaction_lock);
 	auto entry = shared_transactions.find(token);
 	if (entry == shared_transactions.end()) {

@@ -12,6 +12,7 @@
 #include "duckdb/transaction/meta_transaction.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
+#include "duckdb/transaction/shared_transaction_lock.hpp"
 
 namespace duckdb {
 
@@ -106,11 +107,11 @@ unique_ptr<FunctionLocalState> ShareTransactionInit(ExpressionState &state, cons
 		throw TransactionException("Database '%s' does not support shared transactions", database->GetName());
 	}
 	auto &duck_transaction = transaction.Cast<DuckTransaction>();
-	shared_ptr<std::timed_mutex> statement_lock;
+	shared_ptr<SharedTransactionLock> statement_lock;
 	if (duck_transaction.IsShared()) {
 		statement_lock = duck_transaction.GetStatementLock();
 	} else {
-		statement_lock = make_shared_ptr<std::timed_mutex>();
+		statement_lock = make_shared_ptr<SharedTransactionLock>();
 		context.GuardSharedTransaction(statement_lock);
 	}
 	auto token = duck_transaction.GetTransactionManager().ShareTransaction(duck_transaction, std::move(statement_lock));

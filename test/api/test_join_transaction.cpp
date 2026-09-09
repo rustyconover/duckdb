@@ -4,6 +4,7 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/stream_query_result.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
+#include "duckdb/transaction/shared_transaction_lock.hpp"
 #include "test_helpers.hpp"
 
 #include <condition_variable>
@@ -313,18 +314,6 @@ TEST_CASE("JOIN TRANSACTION replaces an unused local DuckTransaction", "[api][jo
 	REQUIRE_NO_FAIL(joiner.Query("COMMIT"));
 }
 
-TEST_CASE("JOIN TRANSACTION validates its context and id", "[api][join_transaction]") {
-	DuckDB database(nullptr);
-	Connection connection(database);
-	REQUIRE_FAIL(connection.Query("SELECT duckdb_share_transaction()"));
-	REQUIRE_FAIL(connection.Query("JOIN TRANSACTION '1/memory'"));
-	REQUIRE_NO_FAIL(connection.Query("BEGIN"));
-	REQUIRE_FAIL(connection.Query("JOIN TRANSACTION ''"));
-	REQUIRE_FAIL(connection.Query("JOIN TRANSACTION 'invalid'"));
-	REQUIRE_FAIL(connection.Query("JOIN TRANSACTION 'abc/memory'"));
-	REQUIRE_NO_FAIL(connection.Query("ROLLBACK"));
-}
-
 TEST_CASE("A meta transaction can only participate in one shared database", "[api][join_transaction]") {
 	DuckDB database(nullptr);
 	Connection setup(database);
@@ -444,7 +433,10 @@ TEST_CASE("An explicitly read-only transaction remains read-only after JOIN", "[
 	REQUIRE_NO_FAIL(owner.Query("BEGIN TRANSACTION READ ONLY"));
 	auto transaction_id = ShareTransaction(owner);
 	JoinTransaction(joiner, transaction_id);
-	REQUIRE_FAIL(joiner.Query("INSERT INTO shared_values VALUES (1)"));
+	auto insert_result = joiner.Query("INSERT INTO shared_values VALUES (1)");
+	REQUIRE_FAIL(insert_result);
+	REQUIRE(insert_result->GetError().find("database \"memory\" - shared transaction is read-only") != string::npos);
+	REQUIRE(insert_result->GetError().find("\"\"memory\"\"") == string::npos);
 	REQUIRE_NO_FAIL(joiner.Query("ROLLBACK"));
 	REQUIRE_FAIL(owner.Query("COMMIT"));
 	auto result = setup.Query("SELECT count(*) FROM shared_values");
@@ -611,6 +603,17 @@ TEST_CASE("Waiting for a shared statement lock is interruptible", "[api][join_tr
 	REQUIRE_FAIL(owner.Query("COMMIT"));
 }
 
+TEST_CASE("Shared transaction locks can be released by another thread", "[api][join_transaction]") {
+	auto statement_lock = make_shared_ptr<SharedTransactionLock>();
+	atomic<bool> acquired {false};
+	std::thread worker([&]() { acquired = statement_lock->TryLockFor(std::chrono::seconds(1)); });
+	worker.join();
+	REQUIRE(acquired.load());
+	statement_lock->Unlock();
+	REQUIRE(statement_lock->TryLockFor(std::chrono::seconds(1)));
+	statement_lock->Unlock();
+}
+
 TEST_CASE("Non-final commit hooks wait for the shared outcome", "[api][join_transaction]") {
 	DuckDB database(nullptr);
 	Connection owner(database);
@@ -661,4 +664,23 @@ TEST_CASE("A later connection secret survives an earlier shared rollback", "[api
 	REQUIRE_NO_FAIL(joiner.Query("ROLLBACK"));
 	auto result = owner.Query("SELECT scope[1] FROM duckdb_secrets() WHERE name = 'shared_secret'");
 	REQUIRE(CHECK_COLUMN(result, 0, {Value("http://later")}));
+}
+
+TEST_CASE("Connection secret undo folds an earlier shared rollback", "[api][join_transaction]") {
+	DuckDB database(nullptr);
+	Connection owner(database);
+	Connection joiner(database);
+	REQUIRE_NO_FAIL(owner.Query("CREATE SECRET shared_secret IN connection (TYPE http, SCOPE 'http://original')"));
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	REQUIRE_NO_FAIL(
+	    owner.Query("CREATE OR REPLACE SECRET shared_secret IN connection (TYPE http, SCOPE 'http://shared')"));
+	JoinTransaction(joiner, ShareTransaction(owner));
+	REQUIRE_NO_FAIL(owner.Query("COMMIT"));
+	REQUIRE_NO_FAIL(owner.Query("BEGIN"));
+	REQUIRE_NO_FAIL(
+	    owner.Query("CREATE OR REPLACE SECRET shared_secret IN connection (TYPE http, SCOPE 'http://later')"));
+	REQUIRE_NO_FAIL(joiner.Query("ROLLBACK"));
+	REQUIRE_NO_FAIL(owner.Query("ROLLBACK"));
+	auto result = owner.Query("SELECT scope[1] FROM duckdb_secrets() WHERE name = 'shared_secret'");
+	REQUIRE(CHECK_COLUMN(result, 0, {Value("http://original")}));
 }

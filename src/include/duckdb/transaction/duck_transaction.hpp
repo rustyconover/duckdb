@@ -22,6 +22,7 @@ class DuckTableEntry;
 class RowGroupCollection;
 class RowVersionManager;
 class DuckTransactionManager;
+class SharedTransactionLock;
 class StorageLockKey;
 class StorageCommitState;
 struct DataTableInfo;
@@ -144,7 +145,7 @@ public:
 	bool IsShared() const {
 		return statement_lock != nullptr;
 	}
-	shared_ptr<std::timed_mutex> GetStatementLock() const {
+	shared_ptr<SharedTransactionLock> GetStatementLock() const {
 		D_ASSERT(statement_lock);
 		return statement_lock;
 	}
@@ -191,7 +192,7 @@ private:
 	//! Flag to prevent auto-checkpointing inside a checkpoint transaction.
 	bool is_checkpoint_transaction = false;
 	//! Allocated when the transaction is first shared.
-	shared_ptr<std::timed_mutex> statement_lock;
+	shared_ptr<SharedTransactionLock> statement_lock;
 };
 
 } // namespace duckdb

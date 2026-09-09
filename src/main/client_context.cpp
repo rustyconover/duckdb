@@ -61,6 +61,7 @@
 #include "duckdb/transaction/transaction_context.hpp"
 #include "duckdb/transaction/transaction_manager.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/transaction/shared_transaction_lock.hpp"
 #include "duckdb/logging/log_type.hpp"
 #include "duckdb/logging/log_manager.hpp"
 #include "duckdb/main/settings.hpp"
@@ -96,19 +97,18 @@ public:
 	unique_ptr<Executor> executor;
 	//! The progress bar
 	unique_ptr<ProgressBar> progress_bar;
-	//! Pins and holds a DuckTransaction's statement mutex for this query.
+	//! Pins and holds a DuckTransaction's statement lock for this query.
 	struct StatementGuard {
-		StatementGuard(shared_ptr<std::timed_mutex> lock_p, ClientContext &context)
-		    : lock(std::move(lock_p)), guard(*lock, std::defer_lock) {
-			while (!guard.try_lock_for(milliseconds(10))) {
+		StatementGuard(shared_ptr<SharedTransactionLock> lock_p, ClientContext &context) : lock(std::move(lock_p)) {
+			while (!lock->TryLockFor(milliseconds(10))) {
 				context.InterruptCheck();
 			}
 		}
-		StatementGuard(StatementGuard &&) = default;
-		StatementGuard &operator=(StatementGuard &&) = default;
+		~StatementGuard() {
+			lock->Unlock();
+		}
 
-		shared_ptr<std::timed_mutex> lock;
-		unique_lock<std::timed_mutex> guard;
+		shared_ptr<SharedTransactionLock> lock;
 	};
 	unique_ptr<StatementGuard> statement_guard;
 
@@ -308,7 +308,7 @@ void ClientContext::DestroyIfSharedTransactionPinned() {
 	}
 }
 
-void ClientContext::GuardSharedTransaction(shared_ptr<std::timed_mutex> statement_lock) {
+void ClientContext::GuardSharedTransaction(shared_ptr<SharedTransactionLock> statement_lock) {
 	D_ASSERT(active_query);
 	if (active_query->statement_guard) {
 		D_ASSERT(active_query->statement_guard->lock == statement_lock);

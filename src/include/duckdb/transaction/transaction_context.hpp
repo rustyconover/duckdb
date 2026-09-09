@@ -82,6 +82,7 @@ private:
 		unique_ptr<MetaTransaction> transaction;
 		shared_ptr<SharedTransactionState> state;
 	};
+	//! Pending voters retain their context until the shared outcome is known so lifecycle hooks can receive that outcome.
 	vector<PendingSharedTransaction> pending_transactions;
 	ErrorData autocheckpoint_error;
 

@@ -358,7 +358,7 @@ AttachedDatabase &MetaTransaction::UseDatabase(shared_ptr<AttachedDatabase> &dat
 
 void MetaTransaction::ModifyDatabase(AttachedDatabase &db, DatabaseModificationType modification) {
 	if (IsReadOnly()) {
-		throw TransactionException("Cannot write to database \"%s\" - transaction is launched in read-only mode",
+		throw TransactionException("Cannot write to database %s - transaction is launched in read-only mode",
 		                           db.GetName());
 	}
 	if (!db.IsSystem() && !db.IsTemporary() && shared_database && !RefersToSameObject(*shared_database, db)) {
@@ -370,8 +370,7 @@ void MetaTransaction::ModifyDatabase(AttachedDatabase &db, DatabaseModificationT
 	if (transaction.IsReadOnly()) {
 		if (transaction.IsDuckTransaction() && transaction.Cast<DuckTransaction>().IsShared() &&
 		    transaction.Cast<DuckTransaction>().IsExplicitlyReadOnly()) {
-			throw TransactionException("Cannot write to database \"%s\" - shared transaction is read-only",
-			                           db.GetName());
+			throw TransactionException("Cannot write to database %s - shared transaction is read-only", db.GetName());
 		}
 		transaction.SetReadWrite();
 	}
