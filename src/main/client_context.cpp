@@ -758,8 +758,14 @@ ClientContext::PendingPreparedStatementInternal(ClientContextLock &lock,
 		query_progress.Restart();
 	}
 
-	const auto stream_result = parameters.query_parameters.output_type == QueryResultOutputType::ALLOW_STREAMING &&
-	                           statement_data.properties.output_type == QueryResultOutputType::ALLOW_STREAMING;
+	// A participant in an exported transaction holds that transaction's statement gate for as long as its query
+	// result lives. Streaming would hold it across API calls, which lets an application deadlock its own exporter:
+	// a thread holding an unconsumed participant result cannot reach the call that would release it. Materializing
+	// keeps the gate confined to query execution. Only the result is buffered; the scan still streams.
+	const auto stream_result =
+	    parameters.query_parameters.output_type == QueryResultOutputType::ALLOW_STREAMING &&
+	    statement_data.properties.output_type == QueryResultOutputType::ALLOW_STREAMING &&
+	    !(transaction.HasActiveTransaction() && transaction.ActiveTransaction().IsSharedParticipant());
 
 	// Decide how to get the result collector.
 	get_result_collector_t get_collector = PhysicalResultCollector::GetResultCollector;
