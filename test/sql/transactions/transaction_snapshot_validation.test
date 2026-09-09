@@ -130,22 +130,21 @@ SELECT duckdb_export_snapshot('database_a')
 statement ok
 ROLLBACK
 
-# A transaction that has written to one database cannot export another.
+# The exporter may write to one database and export another: it owns both transactions and commits
+# them together, and participants only ever read the one they are given.
 statement ok
 BEGIN
 
 statement ok
 INSERT INTO database_b.main.values_table VALUES (1)
 
-statement error
+statement ok
 SELECT duckdb_export_snapshot('database_a')
-----
-has already modified
 
 statement ok
 ROLLBACK
 
-# The write is what constrains the choice, so exporting the written database is fine.
+# Exporting the database it wrote to is equally fine.
 statement ok
 BEGIN
 
