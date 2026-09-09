@@ -65,13 +65,15 @@ static bool WaitForCapture(const shared_ptr<CaptureTransactionState> &capture) {
 	return capture->signal.wait_for(guard, std::chrono::seconds(5), [&]() { return capture->captured; });
 }
 
-//! Counts how many statements are inside the shared gate at once, and blocks until `target` of them arrive.
+//! A barrier that only releases once `target` statements are inside the shared gate at the same time.
 struct ConcurrencyProbe {
 	mutex lock;
 	std::condition_variable signal;
 	idx_t active = 0;
 	idx_t peak = 0;
 	idx_t target = 0;
+	//! Bumped when a full set of statements meets at the barrier, releasing everyone waiting on that round.
+	idx_t generation = 0;
 	bool timed_out = false;
 };
 
@@ -82,11 +84,17 @@ static void RegisterConcurrencyProbe(Connection &connection, const shared_ptr<Co
 			                        unique_lock<mutex> guard(probe->lock);
 			                        probe->active++;
 			                        probe->peak = MaxValue<idx_t>(probe->peak, probe->active);
-			                        probe->signal.notify_all();
-			                        // Wait for the other participants; if the gate serialized us this times out.
-			                        if (!probe->signal.wait_for(guard, std::chrono::seconds(5),
-			                                                    [&]() { return probe->active >= probe->target; })) {
-				                        probe->timed_out = true;
+			                        if (probe->active >= probe->target) {
+				                        // The last arrival releases the whole round.
+				                        probe->generation++;
+				                        probe->signal.notify_all();
+			                        } else {
+				                        // Wait for this round to fill; if the gate serialized us this times out.
+				                        auto round = probe->generation;
+				                        if (!probe->signal.wait_for(guard, std::chrono::seconds(5),
+				                                                    [&]() { return probe->generation != round; })) {
+					                        probe->timed_out = true;
+				                        }
 			                        }
 			                        probe->active--;
 		                        }
