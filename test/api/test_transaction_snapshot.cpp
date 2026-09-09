@@ -922,3 +922,41 @@ TEST_CASE("A rollback outside a statement waits for participants", "[api][transa
 	auto result = setup.Query("SELECT value FROM shared_values");
 	REQUIRE(CHECK_COLUMN(result, 0, {1}));
 }
+
+TEST_CASE("A participant result is materialized, not streamed", "[api][transaction_snapshot]") {
+	// A participant holds the statement gate for as long as its result lives. If that result could stream, a
+	// single thread holding an unconsumed one could not reach the call that releases it, and destroying the
+	// exporter from that thread would block in a destructor with no way out. Materializing keeps the gate
+	// confined to query execution.
+	DuckDB database(nullptr);
+	Connection setup(database);
+	Connection joiner(database);
+	REQUIRE_NO_FAIL(setup.Query("CREATE TABLE shared_values (value BIGINT)"));
+	REQUIRE_NO_FAIL(setup.Query("INSERT INTO shared_values SELECT * FROM range(10000)"));
+
+	auto owner = make_uniq<Connection>(database);
+	REQUIRE_NO_FAIL(owner->Query("BEGIN"));
+	REQUIRE_NO_FAIL(owner->Query("INSERT INTO shared_values VALUES (-1)"));
+	SetTransactionSnapshot(joiner, ExportSnapshot(*owner));
+
+	// The exporter still streams: it is the connection that ends the transaction, so it can always release.
+	auto owner_stream = owner->SendQuery("SELECT value FROM shared_values");
+	REQUIRE(owner_stream->GetResultType() == QueryResultType::STREAM_RESULT);
+	owner_stream->Cast<StreamQueryResult>().Close();
+	owner_stream.reset();
+
+	// The participant does not, even though it asked to stream.
+	auto joiner_stream = joiner.SendQuery("SELECT value FROM shared_values");
+	REQUIRE_NO_FAIL(*joiner_stream);
+	REQUIRE(joiner_stream->GetResultType() == QueryResultType::MATERIALIZED_RESULT);
+	// It still sees the exporter's uncommitted row.
+	auto count = joiner.Query("SELECT count(*) FROM shared_values");
+	REQUIRE(CHECK_COLUMN(count, 0, {10001}));
+
+	// With the result still in hand, this thread can destroy the exporter without deadlocking.
+	owner.reset();
+	REQUIRE_FAIL(joiner.Query("SELECT 42"));
+	REQUIRE_NO_FAIL(joiner.Query("ROLLBACK"));
+	auto result = setup.Query("SELECT count(*) FROM shared_values");
+	REQUIRE(CHECK_COLUMN(result, 0, {10000}));
+}
