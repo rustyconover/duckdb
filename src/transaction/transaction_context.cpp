@@ -10,6 +10,9 @@
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/main/database_manager.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/transaction/duck_transaction_manager.hpp"
+#include "duckdb/transaction/shared_transaction_lock.hpp"
 
 namespace duckdb {
 
@@ -20,6 +23,15 @@ TransactionContext::TransactionContext(ClientContext &context)
 
 TransactionContext::~TransactionContext() {
 	if (current_transaction) {
+		// An exporter waits for in-flight participant statements before its transaction goes away. This path is
+		// reached when the context is destroyed during exception unwinding, which skips ClientContext::Destroy.
+		shared_ptr<SharedTransactionState> shared_state;
+		if (!current_transaction->IsSharedParticipant()) {
+			shared_state = current_transaction->GetSharedTransactionState();
+		}
+		if (shared_state) {
+			shared_state->statement_lock->LockExclusive();
+		}
 		try {
 			Rollback(nullptr);
 		} catch (std::exception &ex) {
@@ -29,6 +41,9 @@ TransactionContext::~TransactionContext() {
 			} catch (...) { // NOLINT
 			}
 		} catch (...) { // NOLINT
+		}
+		if (shared_state) {
+			shared_state->statement_lock->UnlockExclusive();
 		}
 	}
 }
@@ -127,6 +142,42 @@ void TransactionContext::Rollback(optional_ptr<ErrorData> error) {
 void TransactionContext::ClearTransaction() {
 	SetAutoCommit(true);
 	current_transaction = nullptr;
+}
+
+void TransactionContext::SetTransactionSnapshot(const string &snapshot_id) {
+	if (auto_commit || !current_transaction) {
+		throw TransactionException("SET TRANSACTION SNAPSHOT can only be used inside an explicit transaction");
+	}
+	if (snapshot_id.empty()) {
+		throw TransactionException("SET TRANSACTION SNAPSHOT requires a non-empty snapshot id");
+	}
+	if (ValidChecker::IsInvalidated(*current_transaction)) {
+		throw TransactionException("Cannot set the transaction snapshot of an invalidated transaction");
+	}
+	if (current_transaction->SharedDatabase()) {
+		throw TransactionException("Cannot set the transaction snapshot: this connection already takes part in a "
+		                           "shared transaction for database %s",
+		                           current_transaction->SharedDatabase()->GetName());
+	}
+
+	auto &database_manager = DatabaseManager::Get(context);
+	auto database = database_manager.GetSharedTransactionDatabase(snapshot_id);
+	if (!database) {
+		throw TransactionException("Snapshot is no longer available");
+	}
+	if (ValidChecker::IsInvalidated(*database)) {
+		throw TransactionException("Cannot set the transaction snapshot: %s",
+		                           ValidChecker::InvalidatedMessage(*database));
+	}
+	auto &transaction_manager = database->GetTransactionManager();
+	if (!transaction_manager.IsDuckTransactionManager()) {
+		throw TransactionException("Database %s does not support transaction snapshots", database->GetName());
+	}
+	auto &duck_manager = transaction_manager.Cast<DuckTransactionManager>();
+	// Hold the statement lock before looking the transaction up so the exporter cannot end it underneath us.
+	context.GuardSharedTransaction(duck_manager.GetSharedTransactionState(snapshot_id)->statement_lock, false);
+	auto &transaction = duck_manager.JoinTransaction(snapshot_id);
+	current_transaction->Adopt(*database, transaction);
 }
 
 idx_t TransactionContext::GetActiveQuery() {

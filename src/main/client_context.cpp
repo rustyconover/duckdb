@@ -60,6 +60,8 @@
 #include "duckdb/transaction/meta_transaction.hpp"
 #include "duckdb/transaction/transaction_context.hpp"
 #include "duckdb/transaction/transaction_manager.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/transaction/shared_transaction_lock.hpp"
 #include "duckdb/logging/log_type.hpp"
 #include "duckdb/logging/log_manager.hpp"
 #include "duckdb/main/settings.hpp"
@@ -95,6 +97,39 @@ public:
 	unique_ptr<Executor> executor;
 	//! The progress bar
 	unique_ptr<ProgressBar> progress_bar;
+	//! Holds a shared transaction's statement lock for the duration of this query.
+	struct StatementGuard {
+		struct AdoptExclusiveLock {};
+
+		//! Acquire the lock, checking for interrupts and the query deadline while waiting.
+		StatementGuard(shared_ptr<SharedTransactionLock> lock_p, bool exclusive_p, ClientContext &context)
+		    : lock(std::move(lock_p)), exclusive(exclusive_p) {
+			auto wait_check = [&context]() {
+				context.InterruptCheck();
+				context.CheckQueryDeadline();
+			};
+			if (exclusive) {
+				lock->LockExclusive(wait_check);
+			} else {
+				lock->LockShared(wait_check);
+			}
+		}
+		//! Take over an exclusive lock that the caller already holds.
+		StatementGuard(shared_ptr<SharedTransactionLock> lock_p, AdoptExclusiveLock)
+		    : lock(std::move(lock_p)), exclusive(true) {
+		}
+		~StatementGuard() {
+			if (exclusive) {
+				lock->UnlockExclusive();
+			} else {
+				lock->UnlockShared();
+			}
+		}
+
+		shared_ptr<SharedTransactionLock> lock;
+		bool exclusive;
+	};
+	unique_ptr<StatementGuard> statement_guard;
 
 public:
 	void SetOpenResult(BaseQueryResult &result) {
@@ -275,10 +310,38 @@ void ClientContext::Destroy() {
 	if (transaction.HasActiveTransaction()) {
 		transaction.ResetActiveQuery();
 		if (!transaction.IsAutoCommit()) {
+			// An exporter waits for in-flight participant statements before it rolls the shared transaction back.
+			unique_ptr<ActiveQueryContext::StatementGuard> statement_guard;
+			auto &meta_transaction = transaction.ActiveTransaction();
+			auto shared_state = meta_transaction.GetSharedTransactionState();
+			if (shared_state && !meta_transaction.IsSharedParticipant() &&
+			    !(active_query && active_query->statement_guard)) {
+				shared_state->statement_lock->LockExclusive();
+				statement_guard = make_uniq<ActiveQueryContext::StatementGuard>(
+				    shared_state->statement_lock, ActiveQueryContext::StatementGuard::AdoptExclusiveLock());
+			}
 			transaction.Rollback(nullptr);
 		}
 	}
 	CleanupInternal(*lock);
+}
+
+void ClientContext::GuardSharedTransaction(shared_ptr<SharedTransactionLock> statement_lock, bool exclusive) {
+	D_ASSERT(active_query);
+	if (active_query->statement_guard) {
+		D_ASSERT(active_query->statement_guard->lock == statement_lock);
+		D_ASSERT(active_query->statement_guard->exclusive || !exclusive);
+		return;
+	}
+	active_query->statement_guard =
+	    make_uniq<ActiveQueryContext::StatementGuard>(std::move(statement_lock), exclusive, *this);
+}
+
+void ClientContext::AdoptSharedTransactionGuard(shared_ptr<SharedTransactionLock> statement_lock) {
+	D_ASSERT(active_query);
+	D_ASSERT(!active_query->statement_guard);
+	active_query->statement_guard = make_uniq<ActiveQueryContext::StatementGuard>(
+	    std::move(statement_lock), ActiveQueryContext::StatementGuard::AdoptExclusiveLock());
 }
 
 void ClientContext::ProcessError(ErrorData &error, const string &query) const {
@@ -303,7 +366,35 @@ void ClientContext::BeginQueryInternal(ClientContextLock &lock, const SQLStateme
 	if (ValidChecker::IsInvalidated(db_inst)) {
 		throw ErrorManager::InvalidatedDatabase(*this, ValidChecker::InvalidatedMessage(db_inst));
 	}
+	// Set query deadline if max_execution_time is configured
+	auto max_execution_time = Settings::Get<MaxExecutionTimeSetting>(*this);
+	if (max_execution_time > 0) {
+		auto now = steady_clock::now();
+		auto deadline_tp = now + milliseconds(max_execution_time);
+		query_deadline = NumericCast<idx_t>(duration_cast<milliseconds>(deadline_tp.time_since_epoch()).count());
+	} else {
+		query_deadline.SetInvalid();
+	}
+
+	// Serialize the statements of a shared transaction and reject them once the exporter has ended it.
+	// This runs before the query is registered so that a failure here leaves nothing to clean up.
+	unique_ptr<ActiveQueryContext::StatementGuard> statement_guard;
+	if (transaction.HasActiveTransaction()) {
+		auto &meta_transaction = transaction.ActiveTransaction();
+		auto shared_state = meta_transaction.GetSharedTransactionState();
+		if (shared_state) {
+			// The exporter's statements exclude everyone; participants only read and may run concurrently.
+			statement_guard = make_uniq<ActiveQueryContext::StatementGuard>(
+			    shared_state->statement_lock, !meta_transaction.IsSharedParticipant(), *this);
+			if (statement.type != StatementType::TRANSACTION_STATEMENT && shared_state->ended.load()) {
+				throw TransactionException("Shared transaction has ended: the exporting connection has committed or "
+				                           "rolled back. COMMIT or ROLLBACK detaches from it");
+			}
+		}
+	}
+
 	active_query = make_uniq<ActiveQueryContext>();
+	active_query->statement_guard = std::move(statement_guard);
 	if (transaction.IsAutoCommit()) {
 		transaction.BeginTransaction();
 	}
@@ -314,15 +405,6 @@ void ClientContext::BeginQueryInternal(ClientContextLock &lock, const SQLStateme
 	active_query->query = query;
 
 	query_progress.Initialize();
-	// Set query deadline if max_execution_time is configured
-	auto max_execution_time = Settings::Get<MaxExecutionTimeSetting>(*this);
-	if (max_execution_time > 0) {
-		auto now = steady_clock::now();
-		auto deadline_tp = now + milliseconds(max_execution_time);
-		query_deadline = NumericCast<idx_t>(duration_cast<milliseconds>(deadline_tp.time_since_epoch()).count());
-	} else {
-		query_deadline.SetInvalid();
-	}
 	// Notify any registered state of query begin
 	for (auto &state : registered_state->States()) {
 		state->QueryBegin(*this);
@@ -1353,6 +1435,16 @@ void ClientContext::InterruptCheck() const {
 	}
 }
 
+void ClientContext::CheckQueryDeadline() const {
+	if (!query_deadline.IsValid()) {
+		return;
+	}
+	auto now = NumericCast<idx_t>(duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
+	if (now >= query_deadline.GetIndex()) {
+		throw InterruptException("Query exceeded maximum execution time");
+	}
+}
+
 void ClientContext::CancelTransaction() {
 	auto lock = LockContext();
 	InitialCleanup(*lock);
@@ -1402,6 +1494,25 @@ void ClientContext::RunFunctionInTransactionInternal(ClientContextLock &lock, co
 		D_ASSERT(!active_query);
 		transaction.BeginTransaction();
 		interrupt_state = ClientInterruptState::NOT_INTERRUPTED;
+	}
+
+	unique_ptr<ActiveQueryContext::StatementGuard> statement_guard;
+	if (transaction.HasActiveTransaction()) {
+		auto &meta_transaction = transaction.ActiveTransaction();
+		auto shared_state = meta_transaction.GetSharedTransactionState();
+		if (shared_state) {
+			bool exclusive = !meta_transaction.IsSharedParticipant();
+			if (active_query) {
+				GuardSharedTransaction(shared_state->statement_lock, exclusive);
+			} else {
+				statement_guard =
+				    make_uniq<ActiveQueryContext::StatementGuard>(shared_state->statement_lock, exclusive, *this);
+			}
+			if (shared_state->ended.load()) {
+				throw TransactionException("Shared transaction has ended: the exporting connection has committed or "
+				                           "rolled back. COMMIT or ROLLBACK detaches from it");
+			}
+		}
 	}
 	try {
 		fun();

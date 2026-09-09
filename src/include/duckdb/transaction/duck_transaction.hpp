@@ -22,6 +22,7 @@ class DuckTableEntry;
 class RowGroupCollection;
 class RowVersionManager;
 class DuckTransactionManager;
+class SharedTransactionLock;
 class StorageLockKey;
 class StorageCommitState;
 struct DataTableInfo;
@@ -31,6 +32,16 @@ struct CommitInfo {
 	transaction_t commit_id;
 	ActiveTransactionState active_transactions = ActiveTransactionState::UNSET;
 	optional_ptr<CommitDropState> drop_state;
+};
+
+//! State of an exported transaction. Participants keep it after the exporter has ended the transaction.
+struct SharedTransactionState {
+	//! Capability accepted by SET TRANSACTION SNAPSHOT.
+	string token;
+	//! Serializes the statements of every participating connection.
+	shared_ptr<SharedTransactionLock> statement_lock;
+	//! Set once the exporting connection has committed or rolled back.
+	atomic<bool> ended {false};
 };
 
 class DuckTransaction : public Transaction {
@@ -97,7 +108,6 @@ public:
 	transaction_t GetTransactionId() const {
 		return view.transaction_id;
 	}
-
 	unique_ptr<StorageLockKey> TryGetCheckpointLock();
 
 	//! Get a shared lock on a table
@@ -107,7 +117,18 @@ public:
 		is_checkpoint_transaction = true;
 	}
 
+	bool IsShared() const {
+		return shared_state != nullptr;
+	}
+	shared_ptr<SharedTransactionState> GetSharedState() const {
+		return shared_state;
+	}
+
 private:
+	friend class DuckTransactionManager;
+
+	//! Set once the transaction is exported. Guarded by the transaction manager lock.
+	shared_ptr<SharedTransactionState> shared_state;
 	//! The undo buffer is used to store old versions of rows that are updated
 	//! or deleted
 	UndoBuffer undo_buffer;

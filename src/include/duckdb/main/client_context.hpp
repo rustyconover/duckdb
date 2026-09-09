@@ -58,6 +58,7 @@ class BufferedData;
 struct ClientData;
 class ClientContextState;
 class RegisteredStateManager;
+class SharedTransactionLock;
 
 struct PendingQueryParameters {
 	//! Prepared statement parameters (if any)
@@ -145,6 +146,8 @@ public:
 
 	//! Check for interrupt or timeout, throws InterruptException if triggered
 	DUCKDB_API void InterruptCheck() const;
+	//! Throw if the query deadline has passed. Unlike InterruptCheck this always consults the clock.
+	DUCKDB_API void CheckQueryDeadline() const;
 
 	//! Enable query profiling
 	DUCKDB_API void EnableProfiling();
@@ -182,6 +185,10 @@ public:
 
 	//! Destroy the client context
 	DUCKDB_API void Destroy();
+	//! Acquire a shared transaction's statement lock for the active query, including an open streaming result.
+	void GuardSharedTransaction(shared_ptr<SharedTransactionLock> statement_lock, bool exclusive);
+	//! Adopt an already-held shared transaction statement lock for the active query.
+	void AdoptSharedTransactionGuard(shared_ptr<SharedTransactionLock> statement_lock);
 
 	//! Get the table info of a specific table, or nullptr if it cannot be found.
 	DUCKDB_API unique_ptr<TableDescription> TableInfo(const Identifier &database_name, const Identifier &schema_name,

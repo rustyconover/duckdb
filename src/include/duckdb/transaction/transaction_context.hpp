@@ -45,6 +45,8 @@ public:
 	void Rollback(optional_ptr<ErrorData>);
 	void ClearTransaction();
 	void SetAutocheckpointError(ErrorData error);
+	//! Take part, read-only, in the transaction another connection exported with duckdb_export_snapshot().
+	void SetTransactionSnapshot(const string &snapshot_id);
 
 	void SetAutoCommit(bool value);
 	bool IsAutoCommit() const {

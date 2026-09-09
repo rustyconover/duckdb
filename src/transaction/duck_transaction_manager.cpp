@@ -8,10 +8,12 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/types/timestamp.hpp"
+#include "duckdb/common/types/uuid.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/dependency_manager.hpp"
 #include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/transaction/shared_transaction_lock.hpp"
 #include "duckdb/transaction/transaction_data.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection_manager.hpp"
@@ -102,6 +104,79 @@ Transaction &DuckTransactionManager::StartTransaction(ClientContext &context) {
 	// store it in the set of active transactions
 	active_transactions.push_back(std::move(transaction));
 	return transaction_ref;
+}
+
+shared_ptr<SharedTransactionState> DuckTransactionManager::ShareTransaction(DuckTransaction &transaction,
+                                                                            bool &newly_shared) {
+	lock_guard<mutex> lock(transaction_lock);
+	newly_shared = false;
+	if (transaction.shared_state) {
+		return transaction.shared_state;
+	}
+	bool active = false;
+	for (auto &active_transaction : active_transactions) {
+		if (RefersToSameObject(*active_transaction, transaction)) {
+			active = true;
+			break;
+		}
+	}
+	if (!active) {
+		throw TransactionException("Cannot share a transaction that is no longer active");
+	}
+	auto shared_state = make_shared_ptr<SharedTransactionState>();
+	shared_state->statement_lock = make_shared_ptr<SharedTransactionLock>();
+	// The exporting statement owns the lock before the token can be observed, so no participant can run against it.
+	shared_state->statement_lock->LockExclusive();
+	auto &database_manager = DatabaseManager::Get(db);
+	while (true) {
+		shared_state->token = UUID::ToString(UUID::GenerateRandomUUID());
+		auto entry = shared_transactions.emplace(shared_state->token, transaction);
+		if (!entry.second) {
+			continue;
+		}
+		try {
+			if (database_manager.RegisterSharedTransaction(shared_state->token, db)) {
+				break;
+			}
+		} catch (...) {
+			shared_transactions.erase(entry.first);
+			shared_state->statement_lock->UnlockExclusive();
+			throw;
+		}
+		shared_transactions.erase(entry.first);
+	}
+	transaction.shared_state = shared_state;
+	newly_shared = true;
+	return shared_state;
+}
+
+shared_ptr<SharedTransactionState> DuckTransactionManager::GetSharedTransactionState(const string &token) {
+	lock_guard<mutex> lock(transaction_lock);
+	auto entry = shared_transactions.find(token);
+	if (entry == shared_transactions.end()) {
+		throw TransactionException("Shared transaction is no longer available");
+	}
+	return entry->second.get().shared_state;
+}
+
+DuckTransaction &DuckTransactionManager::JoinTransaction(const string &token) {
+	lock_guard<mutex> lock(transaction_lock);
+	auto entry = shared_transactions.find(token);
+	if (entry == shared_transactions.end()) {
+		throw TransactionException("Shared transaction is no longer available");
+	}
+	return entry->second.get();
+}
+
+void DuckTransactionManager::EndSharedTransaction(DuckTransaction &transaction) {
+	lock_guard<mutex> lock(transaction_lock);
+	auto &shared_state = transaction.shared_state;
+	if (!shared_state || shared_state->ended.load()) {
+		return;
+	}
+	shared_state->ended = true;
+	shared_transactions.erase(shared_state->token);
+	DatabaseManager::Get(db).UnregisterSharedTransaction(shared_state->token, db);
 }
 
 void DuckTransactionManager::SetActiveCheckpoint(idx_t checkpoint_id) {
@@ -299,6 +374,9 @@ void DuckTransactionManager::CleanupTransactions() {
 
 ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction_p) {
 	auto &transaction = transaction_p.Cast<DuckTransaction>();
+	if (transaction.IsShared()) {
+		EndSharedTransaction(transaction);
+	}
 	// flush the transaction-local blocks of bulk appends before taking any commit locks (see PreFlushOptimisticBlocks)
 	ErrorData error = transaction.PreFlushOptimisticBlocks(db);
 	unique_lock<mutex> t_lock(transaction_lock);
@@ -470,6 +548,9 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 
 void DuckTransactionManager::RollbackTransaction(Transaction &transaction_p) {
 	auto &transaction = transaction_p.Cast<DuckTransaction>();
+	if (transaction.IsShared()) {
+		EndSharedTransaction(transaction);
+	}
 
 	DUCKDB_LOG(db.GetDatabase(), TransactionLogType, db, "Rollback", transaction.GetTransactionId());
 

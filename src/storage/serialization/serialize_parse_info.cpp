@@ -241,14 +241,12 @@ void AddColumnInfo::Serialize(Serializer &serializer) const {
 	AlterTableInfo::Serialize(serializer);
 	serializer.WriteProperty<ColumnDefinition>(400, "new_column", new_column);
 	serializer.WritePropertyWithDefault<bool>(401, "if_column_not_exists", if_column_not_exists);
-	serializer.WritePropertyWithDefault<bool>(402, "add_not_null", add_not_null);
 }
 
 unique_ptr<AlterTableInfo> AddColumnInfo::Deserialize(Deserializer &deserializer) {
 	auto new_column = deserializer.ReadProperty<ColumnDefinition>(400, "new_column");
 	auto result = duckdb::unique_ptr<AddColumnInfo>(new AddColumnInfo(std::move(new_column)));
 	deserializer.ReadPropertyWithDefault<bool>(401, "if_column_not_exists", result->if_column_not_exists);
-	deserializer.ReadPropertyWithDefault<bool>(402, "add_not_null", result->add_not_null);
 	return std::move(result);
 }
 
@@ -735,6 +733,7 @@ void TransactionInfo::Serialize(Serializer &serializer) const {
 	serializer.WriteProperty<TransactionModifierType>(201, "modifier", modifier);
 	serializer.WritePropertyWithDefault<TransactionInvalidationPolicy>(202, "invalidation_policy", invalidation_policy, TransactionInvalidationPolicy::STANDARD_POLICY);
 	serializer.WritePropertyWithDefault<bool>(203, "auto_rollback", auto_rollback);
+	serializer.WritePropertyWithDefault<string>(204, "snapshot_id", snapshot_id, string());
 }
 
 unique_ptr<ParseInfo> TransactionInfo::Deserialize(Deserializer &deserializer) {
@@ -743,6 +742,7 @@ unique_ptr<ParseInfo> TransactionInfo::Deserialize(Deserializer &deserializer) {
 	deserializer.ReadProperty<TransactionModifierType>(201, "modifier", result->modifier);
 	deserializer.ReadPropertyWithExplicitDefault<TransactionInvalidationPolicy>(202, "invalidation_policy", result->invalidation_policy, TransactionInvalidationPolicy::STANDARD_POLICY);
 	deserializer.ReadPropertyWithDefault<bool>(203, "auto_rollback", result->auto_rollback);
+	deserializer.ReadPropertyWithExplicitDefault<string>(204, "snapshot_id", result->snapshot_id, string());
 	return std::move(result);
 }
 

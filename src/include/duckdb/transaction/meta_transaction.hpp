@@ -24,16 +24,20 @@ class SecretManager;
 class SecretStorage;
 struct DatabaseModificationType;
 class Transaction;
+class DuckTransaction;
+struct SharedTransactionState;
 
 enum class TransactionState { UNCOMMITTED, COMMITTED, ROLLED_BACK };
 
 struct TransactionReference {
-	explicit TransactionReference(Transaction &transaction_p)
-	    : state(TransactionState::UNCOMMITTED), transaction(transaction_p) {
+	explicit TransactionReference(Transaction &transaction_p, bool participant_p = false)
+	    : state(TransactionState::UNCOMMITTED), transaction(transaction_p), participant(participant_p) {
 	}
 
 	TransactionState state;
 	Transaction &transaction;
+	//! True when another connection exported this transaction: it is never committed or rolled back from here.
+	bool participant;
 };
 
 //! The MetaTransaction manages multiple transactions for different attached databases
@@ -62,6 +66,12 @@ public:
 	Transaction &GetTransaction(AttachedDatabase &db);
 	optional_ptr<Transaction> TryGetTransaction(AttachedDatabase &db);
 	void RemoveTransaction(AttachedDatabase &db);
+	//! Check that this transaction may export its transaction for the given database.
+	void ValidateShare(AttachedDatabase &db);
+	//! Record that this transaction exported its transaction for the given database.
+	void SetSharedTransaction(AttachedDatabase &db, shared_ptr<SharedTransactionState> state);
+	//! Take part, read-only, in a transaction exported by another connection.
+	void Adopt(AttachedDatabase &db, DuckTransaction &transaction);
 
 	ErrorData Commit();
 	void Rollback();
@@ -77,6 +87,16 @@ public:
 	optional_ptr<AttachedDatabase> ModifiedDatabase() {
 		return modified_database;
 	}
+	optional_ptr<AttachedDatabase> SharedDatabase() {
+		return shared_database;
+	}
+	shared_ptr<SharedTransactionState> GetSharedTransactionState() const {
+		return shared_state;
+	}
+	//! True when the shared transaction was exported by another connection.
+	bool IsSharedParticipant() const {
+		return shared_participant;
+	}
 	const vector<reference<AttachedDatabase>> &OpenedTransactions() const {
 		return all_transactions;
 	}
@@ -84,6 +104,10 @@ public:
 	shared_ptr<AttachedDatabase> GetReferencedDatabaseOwning(const Identifier &name);
 	AttachedDatabase &UseDatabase(shared_ptr<AttachedDatabase> &database);
 	void DetachDatabase(AttachedDatabase &database);
+
+private:
+	//! Retire the shared transaction before this (exporting) transaction commits or rolls back.
+	void EndSharedTransaction();
 
 private:
 	friend class SecretManager;
@@ -96,6 +120,12 @@ private:
 	vector<reference<AttachedDatabase>> all_transactions;
 	//! The database we are modifying. We can only modify one database per meta transaction.
 	optional_ptr<AttachedDatabase> modified_database;
+	//! The database whose transaction is shared. Only this database may be modified.
+	optional_ptr<AttachedDatabase> shared_database;
+	//! The shared transaction state, when this transaction exported or joined one.
+	shared_ptr<SharedTransactionState> shared_state;
+	//! True when the shared transaction was exported by another connection.
+	bool shared_participant = false;
 	//! Whether the meta transaction is marked as read only.
 	bool is_read_only;
 	//! Lock for referenced_databases.

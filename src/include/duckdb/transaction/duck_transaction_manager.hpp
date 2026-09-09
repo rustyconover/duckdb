@@ -16,6 +16,7 @@
 namespace duckdb {
 class DuckTransactionManager;
 class DuckTransaction;
+struct SharedTransactionState;
 struct UndoBufferProperties;
 
 //! CleanupInfo collects transactions awaiting cleanup.
@@ -41,6 +42,14 @@ public:
 
 	//! Start a new transaction
 	Transaction &StartTransaction(ClientContext &context) override;
+	//! Export an active transaction. The first export creates the shared state and pre-locks its statement lock.
+	shared_ptr<SharedTransactionState> ShareTransaction(DuckTransaction &transaction, bool &newly_shared);
+	//! Look up the shared state of an exported transaction by its token.
+	shared_ptr<SharedTransactionState> GetSharedTransactionState(const string &token);
+	//! Look up an exported transaction so that another connection can participate in it.
+	DuckTransaction &JoinTransaction(const string &token);
+	//! End an exported transaction: participants can no longer use it and the token is retired.
+	void EndSharedTransaction(DuckTransaction &transaction);
 	//! Commit the given transaction
 	ErrorData CommitTransaction(ClientContext &context, Transaction &transaction) override;
 	//! Rollback the given transaction
@@ -144,6 +153,8 @@ private:
 	vector<unique_ptr<DuckTransaction>> active_transactions;
 	//! Set of recently committed transactions
 	vector<unique_ptr<DuckTransaction>> recently_committed_transactions;
+	//! Token lookup for exported transactions. active_transactions owns every entry.
+	unordered_map<string, reference<DuckTransaction>> shared_transactions;
 	//! The lock used for transaction operations
 	mutex transaction_lock;
 	//! The checkpoint lock

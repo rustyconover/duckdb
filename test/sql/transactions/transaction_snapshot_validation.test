@@ -1,0 +1,46 @@
+# name: test/sql/transactions/transaction_snapshot_validation.test
+# description: Validate exported transaction snapshot usage
+# group: [transactions]
+
+statement error
+SELECT duckdb_export_snapshot()
+----
+must be called inside an explicit transaction
+
+statement error
+SET TRANSACTION SNAPSHOT 'invalid'
+----
+can only be used inside an explicit transaction
+
+statement ok
+BEGIN
+
+statement error
+SET TRANSACTION SNAPSHOT ''
+----
+requires a non-empty snapshot id
+
+statement ok
+ROLLBACK
+
+statement ok
+BEGIN
+
+statement error
+SET TRANSACTION SNAPSHOT 'invalid'
+----
+Snapshot is no longer available
+
+statement ok
+ROLLBACK
+
+statement ok
+BEGIN
+
+statement error
+SELECT duckdb_export_snapshot('temp')
+----
+cannot be exported
+
+statement ok
+ROLLBACK
