@@ -10,7 +10,6 @@
 #include "duckdb/transaction/shared_transaction_lock.hpp"
 #include "test_helpers.hpp"
 
-#include <condition_variable>
 #include <thread>
 
 using namespace duckdb;
@@ -30,27 +29,38 @@ static void SetTransactionSnapshot(Connection &connection, const string &transac
 	REQUIRE_NO_FAIL(connection.Query("SET TRANSACTION SNAPSHOT '" + transaction_id + "'"));
 }
 
+//! Publishes a token from inside a running statement and holds that statement open until released.
+//! Deliberately built from atomics: a mutex plus condition variable inside a scalar function makes
+//! ThreadSanitizer report the executor's re-entry into the function as a double lock.
 struct CaptureTransactionState {
-	mutex lock;
-	std::condition_variable signal;
+	mutex token_lock;
 	string token;
-	bool captured = false;
-	bool release = false;
+	atomic<bool> captured {false};
+	atomic<bool> release {false};
 };
 
-//! A scalar function that publishes its argument and then blocks until released, to hold a statement open.
+static bool WaitFor(const std::function<bool()> &condition, idx_t timeout_seconds = 5) {
+	auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_seconds);
+	while (!condition()) {
+		if (std::chrono::steady_clock::now() > deadline) {
+			return false;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	return true;
+}
+
 static void RegisterCaptureTransactionFunction(Connection &connection,
                                                const shared_ptr<CaptureTransactionState> &capture) {
 	ScalarFunction function("capture_shared_transaction", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
 	                        [capture](DataChunk &input, ExpressionState &, Vector &result) {
 		                        auto token = input.GetValue(0, 0).GetValue<string>();
 		                        {
-			                        unique_lock<mutex> guard(capture->lock);
+			                        lock_guard<mutex> guard(capture->token_lock);
 			                        capture->token = token;
-			                        capture->captured = true;
-			                        capture->signal.notify_all();
-			                        capture->signal.wait(guard, [&]() { return capture->release; });
 		                        }
+		                        capture->captured = true;
+		                        WaitFor([&]() { return capture->release.load(); });
 		                        result.Reference(Value(token), count_t(input.size()));
 	                        });
 	CreateScalarFunctionInfo info(function);
@@ -59,49 +69,43 @@ static void RegisterCaptureTransactionFunction(Connection &connection,
 }
 
 static void ReleaseCapture(const shared_ptr<CaptureTransactionState> &capture) {
-	lock_guard<mutex> guard(capture->lock);
 	capture->release = true;
-	capture->signal.notify_all();
 }
 
 static bool WaitForCapture(const shared_ptr<CaptureTransactionState> &capture) {
-	unique_lock<mutex> guard(capture->lock);
-	return capture->signal.wait_for(guard, std::chrono::seconds(5), [&]() { return capture->captured; });
+	return WaitFor([&]() { return capture->captured.load(); });
+}
+
+static string CapturedToken(const shared_ptr<CaptureTransactionState> &capture) {
+	lock_guard<mutex> guard(capture->token_lock);
+	return capture->token;
 }
 
 //! A barrier that only releases once `target` statements are inside the shared gate at the same time.
+//! Atomics only, for the same reason as CaptureTransactionState.
 struct ConcurrencyProbe {
-	mutex lock;
-	std::condition_variable signal;
-	idx_t active = 0;
-	idx_t peak = 0;
+	atomic<idx_t> active {0};
+	atomic<idx_t> peak {0};
 	idx_t target = 0;
-	//! Bumped when a full set of statements meets at the barrier, releasing everyone waiting on that round.
-	idx_t generation = 0;
-	bool timed_out = false;
+	atomic<bool> released {false};
+	atomic<bool> timed_out {false};
 };
 
 static void RegisterConcurrencyProbe(Connection &connection, const shared_ptr<ConcurrencyProbe> &probe) {
 	ScalarFunction function("concurrency_probe", {LogicalType::BIGINT}, LogicalType::BIGINT,
 	                        [probe](DataChunk &input, ExpressionState &, Vector &result) {
-		                        {
-			                        unique_lock<mutex> guard(probe->lock);
-			                        probe->active++;
-			                        probe->peak = MaxValue<idx_t>(probe->peak, probe->active);
-			                        if (probe->active >= probe->target) {
-				                        // The last arrival releases the whole round.
-				                        probe->generation++;
-				                        probe->signal.notify_all();
-			                        } else {
-				                        // Wait for this round to fill; if the gate serialized us this times out.
-				                        auto round = probe->generation;
-				                        if (!probe->signal.wait_for(guard, std::chrono::seconds(5),
-				                                                    [&]() { return probe->generation != round; })) {
-					                        probe->timed_out = true;
-				                        }
-			                        }
-			                        probe->active--;
+		                        auto arrived = ++probe->active;
+		                        auto seen = probe->peak.load();
+		                        while (arrived > seen && !probe->peak.compare_exchange_weak(seen, arrived)) {
 		                        }
+		                        if (arrived >= probe->target) {
+			                        // The last arrival releases the round for everyone, permanently.
+			                        probe->released = true;
+		                        } else if (!WaitFor([&]() { return probe->released.load(); })) {
+			                        // The gate serialized us: the round never filled.
+			                        probe->timed_out = true;
+		                        }
+		                        --probe->active;
 		                        result.Reference(input.data[0]);
 	                        });
 	CreateScalarFunctionInfo info(function);
@@ -633,7 +637,7 @@ TEST_CASE("The exporting statement owns the shared statement lock before publish
 	atomic<bool> join_finished {false};
 	unique_ptr<QueryResult> join_result;
 	std::thread join_thread([&]() {
-		join_result = joiner.Query("SET TRANSACTION SNAPSHOT '" + capture->token + "'");
+		join_result = joiner.Query("SET TRANSACTION SNAPSHOT '" + CapturedToken(capture) + "'");
 		join_finished = true;
 	});
 	std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -843,8 +847,8 @@ TEST_CASE("Participants read the snapshot concurrently", "[api][transaction_snap
 		REQUIRE_NO_FAIL(*results[i]);
 		REQUIRE(CHECK_COLUMN(results[i], 0, {1000}));
 	}
-	REQUIRE(!probe->timed_out);
-	REQUIRE(probe->peak == PARTICIPANT_COUNT);
+	REQUIRE(!probe->timed_out.load());
+	REQUIRE(probe->peak.load() == PARTICIPANT_COUNT);
 
 	for (auto &participant : participants) {
 		REQUIRE_NO_FAIL(participant->Query("ROLLBACK"));
