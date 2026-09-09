@@ -330,6 +330,10 @@ SharedTransactionGate::~SharedTransactionGate() {
 	lock->UnlockExclusive();
 }
 
+bool ClientContext::HasSharedTransactionGuard() const {
+	return active_query && active_query->statement_guard;
+}
+
 unique_ptr<SharedTransactionGate> ClientContext::LockSharedTransactionForFinalize(MetaTransaction &meta_transaction) {
 	if (meta_transaction.IsSharedParticipant()) {
 		// A participant only detaches; it never ends the transaction, and it may already hold the gate shared.

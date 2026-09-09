@@ -54,9 +54,14 @@ optional_ptr<Transaction> MetaTransaction::TryGetTransaction(AttachedDatabase &d
 	if (entry == transactions.end()) {
 		return nullptr;
 	}
-	if (entry->second.borrowed && shared.state->ended.load()) {
-		// The exporter has ended the transaction; the object may be gone.
-		return nullptr;
+	if (entry->second.borrowed) {
+		// Only safe to hand out while this connection holds the gate: its owner takes the gate exclusively to end
+		// the transaction, so it cannot be destroyed underneath the caller.
+		D_ASSERT(context.HasSharedTransactionGuard());
+		if (shared.state->ended.load()) {
+			// The exporter has ended the transaction; the object may be gone.
+			return nullptr;
+		}
 	}
 	return &entry->second.transaction;
 }
@@ -84,9 +89,13 @@ Transaction &MetaTransaction::GetTransaction(AttachedDatabase &db) {
 
 		return new_transaction;
 	} else {
-		if (entry->second.borrowed && shared.state->ended.load()) {
-			throw TransactionException("Shared transaction has ended: the exporting connection has committed or "
-			                           "rolled back. COMMIT or ROLLBACK detaches from it");
+		if (entry->second.borrowed) {
+			// See TransactionReference::borrowed: the gate is what keeps this reference alive.
+			D_ASSERT(context.HasSharedTransactionGuard());
+			if (shared.state->ended.load()) {
+				throw TransactionException("Shared transaction has ended: the exporting connection has committed or "
+				                           "rolled back. COMMIT or ROLLBACK detaches from it");
+			}
 		}
 		auto &transaction = entry->second.transaction;
 		D_ASSERT(entry->second.borrowed ||

@@ -38,6 +38,10 @@ struct TransactionReference {
 	Transaction &transaction;
 	//! True when this transaction belongs to another connection, which exported it as a snapshot. This one only
 	//! reads it: it never starts, commits, rolls back, or otherwise controls the lifetime of a borrowed transaction.
+	//!
+	//! The reference stays valid only while this connection holds that transaction's statement gate, because its
+	//! owner takes the gate exclusively to end it. Every path that hands a borrowed transaction out therefore runs
+	//! inside a statement, and asserts as much.
 	bool borrowed;
 };
 

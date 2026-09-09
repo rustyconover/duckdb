@@ -210,6 +210,8 @@ public:
 	//! down underneath a participant. Returns nothing when there is nothing to guard: the transaction is not
 	//! exported, this connection only reads it, or the running query already holds the gate.
 	unique_ptr<SharedTransactionGate> LockSharedTransactionForFinalize(MetaTransaction &meta_transaction);
+	//! Whether the running query holds an exported transaction's statement gate.
+	bool HasSharedTransactionGuard() const;
 
 	//! Get the table info of a specific table, or nullptr if it cannot be found.
 	DUCKDB_API unique_ptr<TableDescription> TableInfo(const Identifier &database_name, const Identifier &schema_name,
