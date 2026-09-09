@@ -5,6 +5,9 @@
 # Cases that need a second connection to observe the exporter's uncommitted rows live in
 # test/api/test_transaction_snapshot.cpp: a snapshot token cannot be carried between connections
 # from a .test file, because the runner has no way to capture a query result into a variable.
+#
+# A failed statement invalidates the surrounding transaction, so each error case below gets its
+# own BEGIN/ROLLBACK pair.
 
 # ---------------------------------------------------------------- exporting
 
@@ -13,10 +16,10 @@ SELECT duckdb_export_snapshot()
 ----
 must be called inside an explicit transaction
 
+# The token is a UUID, and exporting twice returns the same one for the same transaction.
 statement ok
 BEGIN
 
-# The token is a UUID, and exporting twice returns the same one for the same transaction.
 statement ok
 SET VARIABLE snapshot_id = (SELECT duckdb_export_snapshot())
 
@@ -55,11 +58,23 @@ SELECT duckdb_export_snapshot('does_not_exist')
 ----
 does not exist
 
+statement ok
+ROLLBACK
+
 # The per-connection temporary and system catalogs are not shareable.
+statement ok
+BEGIN
+
 statement error
 SELECT duckdb_export_snapshot('temp')
 ----
 cannot be exported
+
+statement ok
+ROLLBACK
+
+statement ok
+BEGIN
 
 statement error
 SELECT duckdb_export_snapshot('system')
@@ -96,7 +111,19 @@ SELECT duckdb_export_snapshot()
 ----
 ambiguous
 
+statement ok
+ROLLBACK
+
 # Naming the database resolves it.
+statement ok
+BEGIN
+
+statement ok
+SELECT * FROM database_a.main.values_table
+
+statement ok
+SELECT * FROM database_b.main.values_table
+
 statement ok
 SELECT duckdb_export_snapshot('database_a')
 
@@ -156,30 +183,10 @@ SET TRANSACTION SNAPSHOT ''
 ----
 requires a non-empty snapshot id
 
-# Tokens are exact capabilities: an unknown or well-formed-but-wrong one is refused.
-statement error
-SET TRANSACTION SNAPSHOT 'not-a-token'
-----
-Snapshot is no longer available
-
-statement error
-SET TRANSACTION SNAPSHOT '6ba7b810-9dad-11d1-80b4-00c04fd430c8'
-----
-Snapshot is no longer available
-
-# A connection cannot take part in its own exported transaction.
-statement ok
-SET VARIABLE own_id = (SELECT duckdb_export_snapshot('database_a'))
-
-statement error
-SET TRANSACTION SNAPSHOT '6ba7b810-9dad-11d1-80b4-00c04fd430c8'
-----
-already takes part in a shared transaction
-
 statement ok
 ROLLBACK
 
-# A token does not survive the transaction that produced it.
+# Tokens are exact capabilities: an unknown or well-formed-but-wrong one is refused.
 statement ok
 BEGIN
 
@@ -187,6 +194,32 @@ statement error
 SET TRANSACTION SNAPSHOT 'not-a-token'
 ----
 Snapshot is no longer available
+
+statement ok
+ROLLBACK
+
+statement ok
+BEGIN
+
+statement error
+SET TRANSACTION SNAPSHOT '6ba7b810-9dad-11d1-80b4-00c04fd430c8'
+----
+Snapshot is no longer available
+
+statement ok
+ROLLBACK
+
+# A connection that has exported its own transaction cannot then take part in another.
+statement ok
+BEGIN
+
+statement ok
+SELECT duckdb_export_snapshot('database_a')
+
+statement error
+SET TRANSACTION SNAPSHOT '6ba7b810-9dad-11d1-80b4-00c04fd430c8'
+----
+already takes part in a shared transaction
 
 statement ok
 ROLLBACK
