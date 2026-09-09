@@ -99,26 +99,22 @@ private:
 			waiting_writers++;
 		}
 		try {
-			while (!condition.wait_for(guard, std::chrono::milliseconds(10), [&]() { return CanLock(exclusive); })) {
+			while (!CanLock(exclusive)) {
 				if (!wait_check) {
+					condition.wait(guard);
 					continue;
 				}
-				// Run the caller's check with nothing held: it may throw, and it is not ours to run under a lock.
-				guard.unlock();
-				try {
+				condition.wait_for(guard, std::chrono::milliseconds(10));
+				if (!CanLock(exclusive)) {
 					wait_check();
-				} catch (...) {
-					guard.lock();
-					throw;
 				}
-				guard.lock();
 			}
 		} catch (...) {
 			if (exclusive) {
 				waiting_writers--;
+				guard.unlock();
+				condition.notify_all();
 			}
-			guard.unlock();
-			condition.notify_all();
 			throw;
 		}
 		if (exclusive) {
