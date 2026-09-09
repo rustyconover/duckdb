@@ -108,46 +108,62 @@ Transaction &DuckTransactionManager::StartTransaction(ClientContext &context) {
 
 shared_ptr<SharedTransactionState> DuckTransactionManager::ShareTransaction(DuckTransaction &transaction,
                                                                             bool &newly_shared) {
-	lock_guard<mutex> lock(transaction_lock);
-	newly_shared = false;
-	if (transaction.shared_state) {
-		return transaction.shared_state;
-	}
-	bool active = false;
-	for (auto &active_transaction : active_transactions) {
-		if (RefersToSameObject(*active_transaction, transaction)) {
-			active = true;
-			break;
+	// Build the state before taking transaction_lock. Every other path takes a statement lock first and the
+	// manager lock second, so taking them the other way round here would be a lock-order inversion. Nothing else
+	// can reach this lock yet, so holding it costs nothing and keeps the exporting statement the only owner from
+	// the moment the token becomes visible.
+	auto fresh_state = make_shared_ptr<SharedTransactionState>();
+	fresh_state->statement_lock = make_shared_ptr<SharedTransactionLock>();
+	fresh_state->statement_lock->LockExclusive();
+	bool keep_fresh_state = false;
+	auto release_unused = [&]() {
+		if (!keep_fresh_state) {
+			fresh_state->statement_lock->UnlockExclusive();
 		}
-	}
-	if (!active) {
-		throw TransactionException("Cannot share a transaction that is no longer active");
-	}
-	auto shared_state = make_shared_ptr<SharedTransactionState>();
-	shared_state->statement_lock = make_shared_ptr<SharedTransactionLock>();
-	// The exporting statement owns the lock before the token can be observed, so no participant can run against it.
-	shared_state->statement_lock->LockExclusive();
-	auto &database_manager = DatabaseManager::Get(db);
-	while (true) {
-		shared_state->token = UUID::ToString(UUID::GenerateRandomUUID());
-		auto entry = shared_transactions.emplace(shared_state->token, transaction);
-		if (!entry.second) {
-			continue;
+	};
+
+	try {
+		lock_guard<mutex> lock(transaction_lock);
+		newly_shared = false;
+		if (transaction.shared_state) {
+			release_unused();
+			return transaction.shared_state;
 		}
-		try {
-			if (database_manager.RegisterSharedTransaction(shared_state->token, db)) {
+		bool active = false;
+		for (auto &active_transaction : active_transactions) {
+			if (RefersToSameObject(*active_transaction, transaction)) {
+				active = true;
 				break;
 			}
-		} catch (...) {
-			shared_transactions.erase(entry.first);
-			shared_state->statement_lock->UnlockExclusive();
-			throw;
 		}
-		shared_transactions.erase(entry.first);
+		if (!active) {
+			throw TransactionException("Cannot share a transaction that is no longer active");
+		}
+		auto &database_manager = DatabaseManager::Get(db);
+		while (true) {
+			fresh_state->token = UUID::ToString(UUID::GenerateRandomUUID());
+			auto entry = shared_transactions.emplace(fresh_state->token, transaction);
+			if (!entry.second) {
+				continue;
+			}
+			try {
+				if (database_manager.RegisterSharedTransaction(fresh_state->token, db)) {
+					break;
+				}
+			} catch (...) {
+				shared_transactions.erase(entry.first);
+				throw;
+			}
+			shared_transactions.erase(entry.first);
+		}
+		transaction.shared_state = fresh_state;
+		newly_shared = true;
+		keep_fresh_state = true;
+	} catch (...) {
+		release_unused();
+		throw;
 	}
-	transaction.shared_state = shared_state;
-	newly_shared = true;
-	return shared_state;
+	return fresh_state;
 }
 
 shared_ptr<SharedTransactionState> DuckTransactionManager::GetSharedTransactionState(const string &token) {
