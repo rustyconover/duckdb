@@ -60,6 +60,9 @@
 #include "duckdb/transaction/meta_transaction.hpp"
 #include "duckdb/transaction/transaction_context.hpp"
 #include "duckdb/transaction/transaction_manager.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/transaction/shared_transaction_lock.hpp"
+#include "duckdb/transaction/shared_transaction_state.hpp"
 #include "duckdb/logging/log_type.hpp"
 #include "duckdb/logging/log_manager.hpp"
 #include "duckdb/main/settings.hpp"
@@ -95,6 +98,8 @@ public:
 	unique_ptr<Executor> executor;
 	//! The progress bar
 	unique_ptr<ProgressBar> progress_bar;
+	//! Holds a shared transaction's statement lock for the duration of this query.
+	unique_ptr<SharedTransactionGuard> statement_guard;
 
 public:
 	void SetOpenResult(BaseQueryResult &result) {
@@ -272,13 +277,87 @@ static unique_ptr<SQLStatement> WrapAsSelect(unique_ptr<TableRef> from_ref) {
 
 void ClientContext::Destroy() {
 	auto lock = LockContext();
+	// Drain any abandoned result before touching transaction state: its tasks may still be scanning the
+	// transaction, and a participant detaching here can be the one that ends a shared transaction.
+	// EndQueryInternal only commits or rolls back on its own for autocommit, which has nothing to detach from.
+	CleanupInternal(*lock);
 	if (transaction.HasActiveTransaction()) {
 		transaction.ResetActiveQuery();
 		if (!transaction.IsAutoCommit()) {
-			transaction.Rollback(nullptr);
+			// This connection is going away, so it cannot wait for participants to finish reading.
+			transaction.Rollback(nullptr, true);
 		}
 	}
-	CleanupInternal(*lock);
+}
+
+void ClientContext::MarkSharedTransactionInvalidated() {
+	if (!transaction.HasActiveTransaction()) {
+		return;
+	}
+	auto &meta_transaction = ActiveTransaction();
+	if (meta_transaction.IsSharedParticipant()) {
+		// A participant's failure is its own; it never decides the shared transaction's fate.
+		return;
+	}
+	auto shared_state = meta_transaction.GetSharedTransactionState();
+	if (shared_state) {
+		shared_state->MarkInvalidated();
+	}
+}
+
+bool ClientContext::HasSharedTransactionGuard() const {
+	return shared_transaction_guards.load() > 0;
+}
+
+void ClientContext::AddSharedTransactionGuard() {
+	shared_transaction_guards++;
+}
+
+void ClientContext::RemoveSharedTransactionGuard() {
+	auto previous = shared_transaction_guards.fetch_sub(1);
+	D_ASSERT(previous > 0);
+	(void)previous;
+}
+
+unique_ptr<SharedTransactionGuard> ClientContext::LockSharedTransactionForFinalize(MetaTransaction &meta_transaction,
+                                                                                   bool hand_off_instead_of_waiting,
+                                                                                   bool *hand_off) {
+	if (meta_transaction.IsSharedParticipant()) {
+		// A participant only detaches; it never ends the transaction, and it may already hold the lock shared.
+		return nullptr;
+	}
+	auto shared_state = meta_transaction.GetSharedTransactionState();
+	if (!shared_state) {
+		return nullptr;
+	}
+	if (HasSharedTransactionGuard()) {
+		// This runs while the lock is already held, such as an explicit ROLLBACK inside a statement.
+		return nullptr;
+	}
+	if (hand_off_instead_of_waiting && shared_state->TryHandOffToParticipants()) {
+		// Waiting here would block a destructor until an application closes a result it may never close. The
+		// hand-off is only pending so far: we still have to retire the token and make our last dereference, and
+		// a participant leaving in the meantime must not destroy the transaction underneath us.
+		D_ASSERT(hand_off);
+		*hand_off = true;
+		return nullptr;
+	}
+	// Finalizing has no way to report a failed wait, so it waits unconditionally.
+	return make_uniq<SharedTransactionGuard>(*this, shared_state->GetStatementLock(),
+	                                         SharedTransactionGuardMode::ACQUIRE_EXCLUSIVE,
+	                                         SharedTransactionGuardWait::UNINTERRUPTIBLE);
+}
+
+void ClientContext::GuardSharedTransaction(shared_ptr<SharedTransactionLock> statement_lock,
+                                           SharedTransactionGuardMode mode) {
+	D_ASSERT(active_query);
+	if (active_query->statement_guard) {
+		// The query already holds this lock; an exclusive hold also covers a shared request.
+		D_ASSERT(active_query->statement_guard->GetStatementLock() == statement_lock);
+		D_ASSERT(active_query->statement_guard->IsExclusive() || mode == SharedTransactionGuardMode::ACQUIRE_SHARED);
+		return;
+	}
+	active_query->statement_guard = make_uniq<SharedTransactionGuard>(*this, std::move(statement_lock), mode);
 }
 
 void ClientContext::ProcessError(ErrorData &error, const string &query) const {
@@ -303,7 +382,43 @@ void ClientContext::BeginQueryInternal(ClientContextLock &lock, const SQLStateme
 	if (ValidChecker::IsInvalidated(db_inst)) {
 		throw ErrorManager::InvalidatedDatabase(*this, ValidChecker::InvalidatedMessage(db_inst));
 	}
+	// Set query deadline if max_execution_time is configured
+	auto max_execution_time = Settings::Get<MaxExecutionTimeSetting>(*this);
+	if (max_execution_time > 0) {
+		auto now = steady_clock::now();
+		auto deadline_tp = now + milliseconds(max_execution_time);
+		query_deadline = NumericCast<idx_t>(duration_cast<milliseconds>(deadline_tp.time_since_epoch()).count());
+	} else {
+		query_deadline.SetInvalid();
+	}
+
+	// Serialize the statements of a shared transaction and reject them once its owner has ended it.
+	// This runs before the query is registered so that a failure here leaves nothing to clean up.
+	unique_ptr<SharedTransactionGuard> statement_guard;
+	if (transaction.HasActiveTransaction()) {
+		auto &meta_transaction = transaction.ActiveTransaction();
+		auto shared_state = meta_transaction.GetSharedTransactionState();
+		if (shared_state) {
+			// The owner's statements exclude everyone; participants only read and may run concurrently.
+			auto mode = meta_transaction.IsSharedParticipant() ? SharedTransactionGuardMode::ACQUIRE_SHARED
+			                                                   : SharedTransactionGuardMode::ACQUIRE_EXCLUSIVE;
+			statement_guard = make_uniq<SharedTransactionGuard>(*this, shared_state->GetStatementLock(), mode);
+			if (statement.type != StatementType::TRANSACTION_STATEMENT) {
+				if (shared_state->IsEnded()) {
+					throw TransactionException("Shared transaction has ended: the owning connection has committed "
+					                           "or rolled back. COMMIT or ROLLBACK detaches from it");
+				}
+				if (meta_transaction.IsSharedParticipant() && shared_state->IsInvalidated()) {
+					throw TransactionException("Shared transaction is no longer readable: a statement on the owning "
+					                           "connection failed, so its transaction will roll back. COMMIT or "
+					                           "ROLLBACK detaches from it");
+				}
+			}
+		}
+	}
+
 	active_query = make_uniq<ActiveQueryContext>();
+	active_query->statement_guard = std::move(statement_guard);
 	if (transaction.IsAutoCommit()) {
 		transaction.BeginTransaction();
 	}
@@ -314,15 +429,6 @@ void ClientContext::BeginQueryInternal(ClientContextLock &lock, const SQLStateme
 	active_query->query = query;
 
 	query_progress.Initialize();
-	// Set query deadline if max_execution_time is configured
-	auto max_execution_time = Settings::Get<MaxExecutionTimeSetting>(*this);
-	if (max_execution_time > 0) {
-		auto now = steady_clock::now();
-		auto deadline_tp = now + milliseconds(max_execution_time);
-		query_deadline = NumericCast<idx_t>(duration_cast<milliseconds>(deadline_tp.time_since_epoch()).count());
-	} else {
-		query_deadline.SetInvalid();
-	}
 	// Notify any registered state of query begin
 	for (auto &state : registered_state->States()) {
 		state->QueryBegin(*this);
@@ -346,6 +452,12 @@ ErrorData ClientContext::EndQueryInternal(ClientContextLock &lock, bool success,
 		active_query->executor->CancelTasks();
 	}
 	active_query->progress_bar.reset();
+	if (!success && invalidate_transaction && transaction.HasActiveTransaction() && !transaction.IsAutoCommit()) {
+		// This statement failed and is about to invalidate the transaction below. Record that on the shared state
+		// first, while this statement still holds the statement lock exclusively, so that no participant can
+		// start reading a transaction that is now certain to roll back.
+		MarkSharedTransactionInvalidated();
+	}
 	D_ASSERT(active_query.get());
 	active_query.reset();
 	query_deadline.SetInvalid();
@@ -1403,6 +1515,30 @@ void ClientContext::RunFunctionInTransactionInternal(ClientContextLock &lock, co
 		transaction.BeginTransaction();
 		interrupt_state = ClientInterruptState::NOT_INTERRUPTED;
 	}
+
+	unique_ptr<SharedTransactionGuard> statement_guard;
+	if (transaction.HasActiveTransaction()) {
+		auto &meta_transaction = transaction.ActiveTransaction();
+		auto shared_state = meta_transaction.GetSharedTransactionState();
+		if (shared_state) {
+			auto mode = meta_transaction.IsSharedParticipant() ? SharedTransactionGuardMode::ACQUIRE_SHARED
+			                                                   : SharedTransactionGuardMode::ACQUIRE_EXCLUSIVE;
+			if (active_query) {
+				GuardSharedTransaction(shared_state->GetStatementLock(), mode);
+			} else {
+				statement_guard = make_uniq<SharedTransactionGuard>(*this, shared_state->GetStatementLock(), mode);
+			}
+			if (shared_state->IsEnded()) {
+				throw TransactionException("Shared transaction has ended: the owning connection has committed or "
+				                           "rolled back. COMMIT or ROLLBACK detaches from it");
+			}
+			if (meta_transaction.IsSharedParticipant() && shared_state->IsInvalidated()) {
+				throw TransactionException("Shared transaction is no longer readable: a statement on the owning "
+				                           "connection failed, so its transaction will roll back. COMMIT or "
+				                           "ROLLBACK detaches from it");
+			}
+		}
+	}
 	try {
 		fun();
 	} catch (std::exception &ex) {
@@ -1418,6 +1554,8 @@ void ClientContext::RunFunctionInTransactionInternal(ClientContextLock &lock, co
 		if (require_new_transaction) {
 			transaction.Rollback(error);
 		} else if (invalidates_transaction) {
+			// The statement guard above is still held, so this is visible before any participant runs again.
+			MarkSharedTransactionInvalidated();
 			ValidChecker::Invalidate(ActiveTransaction(), error.RawMessage());
 		}
 		throw;
