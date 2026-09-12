@@ -25,6 +25,7 @@ PEGTransformerFactory::TransformPrepareStatement(PEGTransformer &transformer, co
 	if (!IsPrepareableStatement(statement->type)) {
 		throw ParserException("%s is not a preparable statement", EnumUtil::ToString(statement->type));
 	}
+	transformer.AtClauseSubqueryCheck("prepared statement");
 	result->statement = std::move(statement);
 	transformer.ClearParameters();
 	return std::move(result);

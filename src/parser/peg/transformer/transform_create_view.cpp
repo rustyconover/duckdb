@@ -128,6 +128,7 @@ PEGTransformerFactory::TransformCreateViewStmt(PEGTransformer &transformer, cons
 		info->query = std::move(select_statement_internal);
 	}
 	transformer.PivotEntryCheck("view");
+	transformer.AtClauseSubqueryCheck("view");
 	result->info = std::move(info);
 	return result;
 }

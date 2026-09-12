@@ -9,12 +9,13 @@ SetStatement::SetStatement(Identifier name_p, SetScope scope_p, SetType type_p)
 
 // Set Variable
 
-SetVariableStatement::SetVariableStatement(Identifier name_p, unique_ptr<ParsedExpression> value_p, SetScope scope_p)
-    : SetStatement(std::move(name_p), scope_p, SetType::SET), value(std::move(value_p)) {
+SetVariableStatement::SetVariableStatement(Identifier name_p, unique_ptr<ParsedExpression> value_p, SetScope scope_p,
+                                           bool internal_p)
+    : SetStatement(std::move(name_p), scope_p, SetType::SET), value(std::move(value_p)), internal(internal_p) {
 }
 
 SetVariableStatement::SetVariableStatement(const SetVariableStatement &other)
-    : SetStatement(other), value(other.value->Copy()) {
+    : SetStatement(other), value(other.value->Copy()), internal(other.internal) {
 }
 
 unique_ptr<SQLStatement> SetVariableStatement::Copy() const {

@@ -850,13 +850,15 @@ void LogicalSet::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<Identifier>(200, "name", name);
 	serializer.WriteProperty<Value>(201, "value", value);
 	serializer.WriteProperty<SetScope>(202, "scope", scope);
+	serializer.WritePropertyWithDefault<bool>(203, "internal", internal, false);
 }
 
 unique_ptr<LogicalOperator> LogicalSet::Deserialize(Deserializer &deserializer) {
 	auto name = deserializer.ReadPropertyWithDefault<Identifier>(200, "name");
 	auto value = deserializer.ReadProperty<Value>(201, "value");
 	auto scope = deserializer.ReadProperty<SetScope>(202, "scope");
-	auto result = duckdb::unique_ptr<LogicalSet>(new LogicalSet(std::move(name), value, scope));
+	auto internal = deserializer.ReadPropertyWithExplicitDefault<bool>(203, "internal", false);
+	auto result = duckdb::unique_ptr<LogicalSet>(new LogicalSet(std::move(name), value, scope, internal));
 	return std::move(result);
 }
 

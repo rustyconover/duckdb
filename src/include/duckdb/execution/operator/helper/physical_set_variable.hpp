@@ -18,7 +18,8 @@ public:
 	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::SET_VARIABLE;
 
 public:
-	PhysicalSetVariable(PhysicalPlan &physical_plan, const Identifier &name_p, idx_t estimated_cardinality);
+	PhysicalSetVariable(PhysicalPlan &physical_plan, const Identifier &name_p, bool internal_p,
+	                    idx_t estimated_cardinality);
 
 public:
 	// Source interface
@@ -39,6 +40,7 @@ public:
 
 public:
 	String name;
+	bool internal;
 };
 
 } // namespace duckdb

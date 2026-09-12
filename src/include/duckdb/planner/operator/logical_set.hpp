@@ -21,14 +21,15 @@ public:
 	static constexpr const LogicalOperatorType TYPE = LogicalOperatorType::LOGICAL_SET;
 
 public:
-	LogicalSet(Identifier name_p, Value value_p, SetScope scope_p)
+	LogicalSet(Identifier name_p, Value value_p, SetScope scope_p, bool internal_p = false)
 	    : LogicalOperator(LogicalOperatorType::LOGICAL_SET), name(std::move(name_p)), value(std::move(value_p)),
-	      scope(scope_p) {
+	      scope(scope_p), internal(internal_p) {
 	}
 
 	Identifier name;
 	Value value;
 	SetScope scope;
+	bool internal;
 
 public:
 	void Serialize(Serializer &serializer) const override;

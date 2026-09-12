@@ -289,6 +289,7 @@ void PEGTransformer::ClearParameters() {
 void PEGTransformer::Clear() {
 	ClearParameters();
 	pivot_entries.clear();
+	at_clause_subqueries.clear();
 	stored_cte_map.clear();
 }
 
@@ -360,12 +361,40 @@ unique_ptr<SQLStatement> PEGTransformer::CreatePivotStatement(unique_ptr<SQLStat
 	return std::move(result);
 }
 
+unique_ptr<SQLStatement> PEGTransformer::CreateAtClauseStatement(unique_ptr<SQLStatement> statement) {
+	if (!named_parameter_map.empty() || has_anonymous_parameters) {
+		throw ParserException("AT clauses with subqueries cannot be used with prepared statement parameters");
+	}
+	auto result = make_uniq<MultiStatement>();
+	for (auto &set_statement : at_clause_subqueries) {
+		set_statement->query = set_statement->ToString();
+		result->statements.push_back(std::move(set_statement));
+	}
+	result->stmt_location = statement->stmt_location;
+	if (statement->type == StatementType::MULTI_STATEMENT) {
+		auto &multi_statement = statement->Cast<MultiStatement>();
+		for (auto &child_statement : multi_statement.statements) {
+			result->statements.push_back(std::move(child_statement));
+		}
+	} else {
+		statement->query = statement->ToString();
+		result->statements.push_back(std::move(statement));
+	}
+	return std::move(result);
+}
+
 void PEGTransformer::PivotEntryCheck(const string &type) {
 	if (!pivot_entries.empty()) {
 		throw ParserException(
 		    "PIVOT statements with pivot elements extracted from the data cannot be used in %ss.\nIn order to use "
 		    "PIVOT in a %s the PIVOT values must be manually specified, e.g.:\nPIVOT ... ON %s IN (val1, val2, ...)",
 		    type, type, pivot_entries[0]->column->ToString());
+	}
+}
+
+void PEGTransformer::AtClauseSubqueryCheck(const string &type) {
+	if (!at_clause_subqueries.empty()) {
+		throw ParserException("AT clauses with subqueries cannot be used in %ss", type);
 	}
 }
 

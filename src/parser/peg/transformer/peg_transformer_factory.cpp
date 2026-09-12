@@ -43,6 +43,9 @@ static unique_ptr<SQLStatement> ExtractAndTransformStatement(PEGTransformer &tra
 	if (!transformer.pivot_entries.empty()) {
 		stmt = transformer.CreatePivotStatement(std::move(stmt));
 	}
+	if (!transformer.at_clause_subqueries.empty()) {
+		stmt = transformer.CreateAtClauseStatement(std::move(stmt));
+	}
 	transformer.Clear();
 
 	// Calculate location and length cleanly

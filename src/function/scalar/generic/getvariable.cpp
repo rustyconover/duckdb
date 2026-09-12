@@ -24,7 +24,7 @@ struct GetVariableBindData : FunctionData {
 	}
 };
 
-unique_ptr<FunctionData> GetVariableBind(BindScalarFunctionInput &input) {
+unique_ptr<FunctionData> GetVariableBindInternal(BindScalarFunctionInput &input, bool internal) {
 	auto &context = input.GetClientContext();
 	auto &arguments = input.GetArguments();
 	auto &function = input.GetBoundFunction();
@@ -35,10 +35,24 @@ unique_ptr<FunctionData> GetVariableBind(BindScalarFunctionInput &input) {
 	auto variable_name = input.GetConstant(0);
 	Value value;
 	if (!variable_name.IsNull()) {
-		ClientConfig::GetConfig(context).GetUserVariable(variable_name.ToString(), value);
+		auto &config = ClientConfig::GetConfig(context);
+		const auto identifier = Identifier(variable_name.ToString());
+		if (internal) {
+			config.GetInternalVariable(identifier, value);
+		} else {
+			config.GetUserVariable(identifier, value);
+		}
 	}
 	function.SetReturnType(value.type());
 	return make_uniq<GetVariableBindData>(std::move(value));
+}
+
+unique_ptr<FunctionData> GetVariableBind(BindScalarFunctionInput &input) {
+	return GetVariableBindInternal(input, false);
+}
+
+unique_ptr<FunctionData> GetInternalVariableBind(BindScalarFunctionInput &input) {
+	return GetVariableBindInternal(input, true);
 }
 
 unique_ptr<Expression> BindGetVariableExpression(FunctionBindExpressionInput &input) {
@@ -56,6 +70,13 @@ unique_ptr<Expression> BindGetVariableExpression(FunctionBindExpressionInput &in
 ScalarFunction GetVariableFun::GetFunction() {
 	ScalarFunction getvar("getvariable", {{"variable_name", LogicalType::VARCHAR}}, LogicalType::ANY, nullptr,
 	                      GetVariableBind, nullptr);
+	getvar.SetBindExpressionCallback(BindGetVariableExpression);
+	return getvar;
+}
+
+ScalarFunction GetInternalVariableFun::GetFunction() {
+	ScalarFunction getvar("__internal_getvariable", {{"variable_name", LogicalType::VARCHAR}}, LogicalType::ANY,
+	                      nullptr, GetInternalVariableBind, nullptr);
 	getvar.SetBindExpressionCallback(BindGetVariableExpression);
 	return getvar;
 }

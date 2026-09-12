@@ -35,6 +35,16 @@ struct GetVariableFun {
 	static ScalarFunction GetFunction();
 };
 
+struct GetInternalVariableFun {
+	static constexpr const char *Name = "__internal_getvariable";
+	static constexpr const char *Parameters = "";
+	static constexpr const char *Description = "";
+	static constexpr const char *Example = "";
+	static constexpr const char *Categories = "";
+
+	static ScalarFunction GetFunction();
+};
+
 struct ErrorFun {
 	static constexpr const char *Name = "error";
 	static constexpr const char *Parameters = "message";

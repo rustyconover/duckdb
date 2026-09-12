@@ -4,11 +4,11 @@
 
 namespace duckdb {
 
-PhysicalSetVariable::PhysicalSetVariable(PhysicalPlan &physical_plan, const Identifier &name_p,
+PhysicalSetVariable::PhysicalSetVariable(PhysicalPlan &physical_plan, const Identifier &name_p, bool internal_p,
                                          idx_t estimated_cardinality)
     : PhysicalOperator(physical_plan, PhysicalOperatorType::SET_VARIABLE, {LogicalType::BOOLEAN},
                        estimated_cardinality),
-      name(physical_plan.ArenaRef().MakeString(name_p.GetIdentifierName())) {
+      name(physical_plan.ArenaRef().MakeString(name_p.GetIdentifierName())), internal(internal_p) {
 }
 
 SourceResultType PhysicalSetVariable::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
@@ -34,7 +34,11 @@ SinkResultType PhysicalSetVariable::Sink(ExecutionContext &context, DataChunk &c
 		throw InvalidInputException("PhysicalSetVariable can only handle a single value");
 	}
 	auto &config = ClientConfig::GetConfig(context.client);
-	config.SetUserVariable(name, chunk.GetValue(0, 0));
+	if (internal) {
+		config.SetInternalVariable(name, chunk.GetValue(0, 0));
+	} else {
+		config.SetUserVariable(name, chunk.GetValue(0, 0));
+	}
 	gstate.is_set = true;
 	return SinkResultType::NEED_MORE_INPUT;
 }

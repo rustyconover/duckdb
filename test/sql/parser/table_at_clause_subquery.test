@@ -1,0 +1,82 @@
+# name: test/sql/parser/table_at_clause_subquery.test
+# description: Test scalar subqueries in table AT clauses
+# group: [parser]
+
+statement ok
+CREATE TABLE tbl(i INTEGER)
+
+statement ok
+CREATE SEQUENCE snapshot_selector
+
+statement ok
+CREATE TABLE "tbl$snapshots" (snapshot_id UBIGINT)
+
+statement ok
+INSERT INTO "tbl$snapshots" VALUES (1), (2)
+
+statement error
+SELECT * FROM tbl AT (VERSION => (SELECT max(snapshot_id) FROM "tbl$snapshots"))
+----
+Catalog type does not support time travel
+
+# The selector is executed before the table is bound
+statement error
+SELECT * FROM tbl AT (VERSION => (SELECT nextval('snapshot_selector')))
+----
+Catalog type does not support time travel
+
+query I
+SELECT currval('snapshot_selector')
+----
+1
+
+# CTEs in the enclosing query are visible to the selector
+statement error
+WITH snapshots(version) AS (VALUES (nextval('snapshot_selector')))
+SELECT * FROM tbl AT (VERSION => (SELECT version FROM snapshots))
+----
+Catalog type does not support time travel
+
+query I
+SELECT currval('snapshot_selector')
+----
+2
+
+# Internal selector variables are not exposed as user variables
+query I
+SELECT count(*) FROM duckdb_variables() WHERE name LIKE '__duckdb_internal_at_%'
+----
+0
+
+# Scalar subquery cardinality rules apply to the selector
+statement error
+SELECT * FROM tbl AT (VERSION => (SELECT i FROM range(2) t(i)))
+----
+More than one row returned by a subquery used as an expression
+
+# Correlated references are not available when the selector is executed
+statement error
+SELECT * FROM tbl outer_tbl, tbl AT (VERSION => (SELECT outer_tbl.i))
+----
+<REGEX>:Binder Error.*Referenced table "outer_tbl" not found.*
+
+# Parameterized and persistent statements cannot defer snapshot selection
+statement error
+SELECT * FROM tbl AT (VERSION => (SELECT $1))
+----
+AT clauses with subqueries cannot be used with prepared statement parameters
+
+statement error
+PREPARE at_prepare AS SELECT * FROM tbl AT (VERSION => (SELECT 1))
+----
+AT clauses with subqueries cannot be used in prepared statements
+
+statement error
+CREATE VIEW at_view AS SELECT * FROM tbl AT (VERSION => (SELECT 1))
+----
+AT clauses with subqueries cannot be used in views
+
+statement error
+CREATE MACRO at_macro() AS TABLE SELECT * FROM tbl AT (VERSION => (SELECT 1))
+----
+AT clauses with subqueries cannot be used in macros

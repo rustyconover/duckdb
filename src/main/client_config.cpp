@@ -29,6 +29,23 @@ void ClientConfig::ResetUserVariable(const String &name) {
 	user_variables.erase(StringToIdentifier(name));
 }
 
+void ClientConfig::SetInternalVariable(const String &name, Value value) {
+	internal_variables[StringToIdentifier(name)] = std::move(value);
+}
+
+bool ClientConfig::GetInternalVariable(const Identifier &name, Value &result) {
+	auto entry = internal_variables.find(name);
+	if (entry == internal_variables.end()) {
+		return false;
+	}
+	result = entry->second;
+	return true;
+}
+
+void ClientConfig::ClearInternalVariables() {
+	internal_variables.clear();
+}
+
 void ClientConfig::SetDefaultStreamingBufferSize() {
 	auto memory = FileSystem::GetAvailableMemory();
 	auto default_size = ClientConfig().max_streaming_buffer_size;

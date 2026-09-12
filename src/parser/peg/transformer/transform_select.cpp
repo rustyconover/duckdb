@@ -21,10 +21,12 @@
 #include "duckdb/parser/statement/update_statement.hpp"
 #include "duckdb/parser/statement/delete_statement.hpp"
 #include "duckdb/parser/statement/copy_statement.hpp"
+#include "duckdb/parser/expression/subquery_expression.hpp"
 #include "duckdb/parser/query_node/insert_query_node.hpp"
 #include "duckdb/parser/query_node/update_query_node.hpp"
 #include "duckdb/parser/query_node/delete_query_node.hpp"
 #include "duckdb/parser/query_node/copy_query_node.hpp"
+#include "duckdb/common/types/uuid.hpp"
 
 namespace duckdb {
 
@@ -1690,7 +1692,29 @@ unique_ptr<AtClause> PEGTransformerFactory::TransformAtClause(PEGTransformer &tr
 
 unique_ptr<AtClause> PEGTransformerFactory::TransformAtSpecifier(PEGTransformer &transformer, const string &at_unit,
                                                                  unique_ptr<ParsedExpression> expression) {
-	return make_uniq<AtClause>(Identifier(at_unit), std::move(expression));
+	if (!expression->HasSubquery()) {
+		return make_uniq<AtClause>(Identifier(at_unit), std::move(expression));
+	}
+
+	// The selected snapshot can determine the table schema, so resolve it before binding the main statement.
+	auto selector = make_uniq<SelectNode>();
+	transformer.ExtractCTEsRecursive(selector->cte_map);
+	selector->select_list.push_back(std::move(expression));
+	selector->from_table = make_uniq<EmptyTableRef>();
+	auto selector_statement = make_uniq<SelectStatement>();
+	selector_statement->node = std::move(selector);
+	auto selector_expression = make_uniq<SubqueryExpression>();
+	selector_expression->GetSubqueryTypeMutable() = SubqueryType::SCALAR;
+	selector_expression->SubqueryMutable() = std::move(selector_statement);
+
+	auto variable_name = Identifier("__duckdb_internal_at_" + UUID::ToString(UUID::GenerateRandomUUID()));
+	transformer.at_clause_subqueries.push_back(
+	    make_uniq<SetVariableStatement>(variable_name, std::move(selector_expression), SetScope::VARIABLE, true));
+
+	vector<unique_ptr<ParsedExpression>> get_variable_children;
+	get_variable_children.push_back(make_uniq<ConstantExpression>(Value(variable_name.GetIdentifierName())));
+	auto get_variable = make_uniq<FunctionExpression>("__internal_getvariable", std::move(get_variable_children));
+	return make_uniq<AtClause>(Identifier(at_unit), std::move(get_variable));
 }
 
 unique_ptr<TableRef> PEGTransformerFactory::TransformJoinWithoutOnClause(PEGTransformer &transformer,

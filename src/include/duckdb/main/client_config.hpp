@@ -82,6 +82,8 @@ struct ClientConfig {
 
 	//! Variables set by the user
 	identifier_map_t<Value> user_variables;
+	//! Variables used while preprocessing a query
+	identifier_map_t<Value> internal_variables;
 
 	//! Function that is used to create the result collector for a materialized result.
 	get_result_collector_t get_result_collector = nullptr;
@@ -99,6 +101,9 @@ public:
 	bool GetUserVariable(const Identifier &name, Value &result);
 	bool GetUserVariable(const string &name, Value &result);
 	void ResetUserVariable(const String &name);
+	void SetInternalVariable(const String &name, Value value);
+	bool GetInternalVariable(const Identifier &name, Value &result);
+	void ClearInternalVariables();
 
 public:
 	void SetDefaultStreamingBufferSize();

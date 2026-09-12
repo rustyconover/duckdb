@@ -328,8 +328,10 @@ public:
 	void SetParamCount(idx_t new_count);
 	idx_t ParamCount() const;
 	unique_ptr<SQLStatement> CreatePivotStatement(unique_ptr<SQLStatement> statement);
+	unique_ptr<SQLStatement> CreateAtClauseStatement(unique_ptr<SQLStatement> statement);
 	unique_ptr<SQLStatement> GenerateCreateEnumStmt(unique_ptr<CreatePivotEntry> entry);
 	void PivotEntryCheck(const string &type);
+	void AtClauseSubqueryCheck(const string &type);
 	void ExtractCTEsRecursive(CommonTableExpressionMap &cte_map);
 	bool IsWindowFrameDefault(WindowBoundary start, WindowBoundary end);
 	unique_ptr<WindowExpression> GetWindowClause(const Identifier &window_name);
@@ -371,6 +373,7 @@ public:
 	identifier_map_t<unique_ptr<WindowExpression>> window_clauses;
 
 	vector<unique_ptr<CreatePivotEntry>> pivot_entries;
+	vector<unique_ptr<SetVariableStatement>> at_clause_subqueries;
 	vector<reference<CommonTableExpressionMap>> stored_cte_map;
 
 	bool in_window_definition = false;

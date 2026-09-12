@@ -31,7 +31,8 @@ public:
 
 class SetVariableStatement : public SetStatement {
 public:
-	SetVariableStatement(Identifier name_p, unique_ptr<ParsedExpression> value_p, SetScope scope_p);
+	SetVariableStatement(Identifier name_p, unique_ptr<ParsedExpression> value_p, SetScope scope_p,
+	                     bool internal_p = false);
 
 protected:
 	SetVariableStatement(const SetVariableStatement &other);
@@ -42,6 +43,7 @@ public:
 
 public:
 	unique_ptr<ParsedExpression> value;
+	bool internal;
 };
 
 class ResetVariableStatement : public SetStatement {

@@ -15,6 +15,14 @@
         "struct": "GetVariableFun"
     },
     {
+        "name": "__internal_getvariable",
+        "parameters": "",
+        "description": "",
+        "example": "",
+        "type": "scalar_function",
+        "struct": "GetInternalVariableFun"
+    },
+    {
         "name": "error",
         "parameters": "message",
         "description": "Throws the given error message",

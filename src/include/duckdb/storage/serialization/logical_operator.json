@@ -1067,12 +1067,19 @@
         "id": 202,
         "name": "scope",
         "type": "SetScope"
+      },
+      {
+        "id": 203,
+        "name": "internal",
+        "type": "bool",
+        "default": "false"
       }
     ],
     "constructor": [
       "name",
       "value",
-      "scope"
+      "scope",
+      "internal"
     ]
   },
   {

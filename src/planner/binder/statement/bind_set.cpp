@@ -34,7 +34,7 @@ BoundStatement Binder::Bind(SetVariableStatement &stmt) {
 		}
 		op = std::move(bound_select.plan);
 	}
-	result.plan = make_uniq<LogicalSet>(stmt.name, std::move(value), stmt.scope);
+	result.plan = make_uniq<LogicalSet>(stmt.name, std::move(value), stmt.scope, stmt.internal);
 	if (op) {
 		result.plan->children.push_back(std::move(op));
 	}

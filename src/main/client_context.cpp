@@ -132,6 +132,18 @@ struct ActiveQueryGuard {
 	}
 };
 
+struct InternalVariableScope {
+	explicit InternalVariableScope(ClientConfig &config_p) : config(config_p) {
+		config.ClearInternalVariables();
+	}
+
+	~InternalVariableScope() {
+		config.ClearInternalVariables();
+	}
+
+	ClientConfig &config;
+};
+
 #ifdef DEBUG
 struct DebugClientContextState : public ClientContextState {
 	~DebugClientContextState() override {
@@ -1113,6 +1125,7 @@ unique_ptr<QueryResult> ClientContext::Query(unique_ptr<SQLStatement> statement,
 
 unique_ptr<QueryResult> ClientContext::Query(const string &query, QueryParameters query_parameters) {
 	auto lock = LockContext();
+	InternalVariableScope internal_variable_scope(ClientConfig::GetConfig(*this));
 	// The lazy path bypasses ParseStatementsInternal → InitialCleanup, so clear leftover query state
 	// (interrupt flag, etc.) ourselves.
 	InitialCleanup(*lock);
