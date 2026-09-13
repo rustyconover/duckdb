@@ -203,6 +203,7 @@ TEST_CASE("Table in-out functions accept multiple TABLE parameters", "[tablefunc
 	MultiTableEcho::Register(con, "multi_table_echo", {LogicalType::TABLE, LogicalType::TABLE});
 	MultiTableEcho::Register(con, "three_table_echo", {LogicalType::TABLE, LogicalType::TABLE, LogicalType::TABLE});
 	MultiTableEcho::Register(con, "mixed_table_echo", {LogicalType::TABLE, LogicalType::VARCHAR, LogicalType::TABLE});
+	REQUIRE_NO_FAIL(*con.Query("SET debug_verify_serializer=true"));
 
 	auto unrelated = con.Query(R"(
 		SELECT table_index, row_value.arg_0.i, row_value.arg_1.s
@@ -263,6 +264,86 @@ TEST_CASE("Table in-out functions accept multiple TABLE parameters", "[tablefunc
 	REQUIRE_NO_FAIL(*duplicate_names);
 	REQUIRE(CHECK_COLUMN(duplicate_names, 0, {1}));
 	REQUIRE(CHECK_COLUMN(duplicate_names, 1, {2}));
+
+	auto nested = con.Query(R"(
+		SELECT table_index, row_value.arg_0.items, row_value.arg_1.nested.x
+		FROM multi_table_echo(
+			(SELECT [1, NULL]::INTEGER[] AS items),
+			(SELECT {'x': 42::INTEGER} AS nested))
+		ORDER BY table_index
+	)");
+	REQUIRE_NO_FAIL(*nested);
+	REQUIRE(CHECK_COLUMN(nested, 0, {0, 1}));
+	REQUIRE(CHECK_COLUMN(nested, 1, {Value::LIST(LogicalType::INTEGER, {1, Value()}), Value()}));
+	REQUIRE(CHECK_COLUMN(nested, 2, {Value(), 42}));
+
+	auto multiple_vectors = con.Query(R"(
+		SELECT table_index, count(*)
+		FROM multi_table_echo(
+			(SELECT i FROM range(5000) t(i)),
+			(SELECT i FROM range(7000) t(i)))
+		GROUP BY table_index
+		ORDER BY table_index
+	)");
+	REQUIRE_NO_FAIL(*multiple_vectors);
+	REQUIRE(CHECK_COLUMN(multiple_vectors, 0, {0, 1}));
+	REQUIRE(CHECK_COLUMN(multiple_vectors, 1, {5000, 7000}));
+
+	auto all_empty = con.Query(R"(
+		SELECT count(*)
+		FROM multi_table_echo(
+			(SELECT i FROM range(0) t(i)),
+			(SELECT i FROM range(0) t(i)))
+	)");
+	REQUIRE_NO_FAIL(*all_empty);
+	REQUIRE(CHECK_COLUMN(all_empty, 0, {0}));
+}
+
+TEST_CASE("Correlated multiple TABLE parameters", "[tablefunction]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	MultiTableEcho::Register(con, "multi_table_lateral_echo", {LogicalType::TABLE, LogicalType::TABLE});
+
+	auto same_outer = con.Query(R"(
+		SELECT outer_rows.i, echoed.table_index, echoed.row_value.arg_0.v, echoed.row_value.arg_1.v
+		FROM range(2) outer_rows(i), LATERAL multi_table_lateral_echo(
+			(SELECT outer_rows.i AS v), (SELECT outer_rows.i AS v)) echoed
+		ORDER BY outer_rows.i, echoed.table_index
+	)");
+	REQUIRE_NO_FAIL(*same_outer);
+	REQUIRE(CHECK_COLUMN(same_outer, 0, {0, 0, 1, 1}));
+	REQUIRE(CHECK_COLUMN(same_outer, 1, {0, 1, 0, 1}));
+
+	auto different_outer = con.Query(R"(
+		SELECT outer_rows.i, echoed.table_index, echoed.row_value.arg_0.v, echoed.row_value.arg_1.v
+		FROM range(2) outer_rows(i), LATERAL multi_table_lateral_echo(
+			(SELECT outer_rows.i AS v), (SELECT outer_rows.i + 100 AS v)) echoed
+		ORDER BY outer_rows.i, echoed.table_index
+	)");
+	REQUIRE_NO_FAIL(*different_outer);
+	REQUIRE(CHECK_COLUMN(different_outer, 2, {0, Value(), 1, Value()}));
+	REQUIRE(CHECK_COLUMN(different_outer, 3, {Value(), 100, Value(), 101}));
+
+	auto mixed_correlation = con.Query(R"(
+		SELECT outer_rows.i, echoed.table_index, echoed.row_value.arg_0.v, echoed.row_value.arg_1.v
+		FROM range(2) outer_rows(i), LATERAL multi_table_lateral_echo(
+			(SELECT outer_rows.i AS v), (SELECT 42::BIGINT AS v)) echoed
+		ORDER BY outer_rows.i, echoed.table_index
+	)");
+	REQUIRE_NO_FAIL(*mixed_correlation);
+	REQUIRE(CHECK_COLUMN(mixed_correlation, 2, {0, Value(), 1, Value()}));
+	REQUIRE(CHECK_COLUMN(mixed_correlation, 3, {Value(), 42, Value(), 42}));
+
+	auto correlated_empty = con.Query(R"(
+		SELECT outer_rows.i, echoed.table_index, echoed.row_value.arg_1.v
+		FROM range(2) outer_rows(i), LATERAL multi_table_lateral_echo(
+			(SELECT outer_rows.i AS v WHERE false), (SELECT outer_rows.i + 10 AS v)) echoed
+		ORDER BY outer_rows.i, echoed.table_index
+	)");
+	REQUIRE_NO_FAIL(*correlated_empty);
+	REQUIRE(CHECK_COLUMN(correlated_empty, 0, {0, 1}));
+	REQUIRE(CHECK_COLUMN(correlated_empty, 1, {1, 1}));
+	REQUIRE(CHECK_COLUMN(correlated_empty, 2, {10, 11}));
 }
 
 struct FilterPushdownEcho {
