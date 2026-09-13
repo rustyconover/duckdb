@@ -546,7 +546,7 @@ TEST_CASE("Multiple TABLE parameters enforce the UNION member limit", "[tablefun
 	};
 	auto maximum = con.Query(create_query("maximum_table_inputs", UnionType::MAX_UNION_MEMBERS));
 	REQUIRE_NO_FAIL(*maximum);
-	REQUIRE(CHECK_COLUMN(maximum, 0, {UnionType::MAX_UNION_MEMBERS}));
+	REQUIRE(CHECK_COLUMN(maximum, 0, {static_cast<int64_t>(UnionType::MAX_UNION_MEMBERS)}));
 
 	auto too_many = con.Query(create_query("too_many_table_inputs", UnionType::MAX_UNION_MEMBERS + 1));
 	REQUIRE(too_many->HasError());
