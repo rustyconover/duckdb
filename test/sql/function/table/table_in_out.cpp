@@ -346,6 +346,25 @@ TEST_CASE("Correlated multiple TABLE parameters", "[tablefunction]") {
 	REQUIRE(CHECK_COLUMN(correlated_empty, 2, {10, 11}));
 }
 
+TEST_CASE("Multiple TABLE parameters enforce the UNION member limit", "[tablefunction]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	vector<LogicalType> arguments(UnionType::MAX_UNION_MEMBERS + 1, LogicalType::TABLE);
+	MultiTableEcho::Register(con, "too_many_table_inputs", std::move(arguments));
+
+	string query = "SELECT * FROM too_many_table_inputs(";
+	for (idx_t table_idx = 0; table_idx <= UnionType::MAX_UNION_MEMBERS; table_idx++) {
+		if (table_idx > 0) {
+			query += ", ";
+		}
+		query += "(SELECT 1 AS i)";
+	}
+	query += ")";
+	auto result = con.Query(query);
+	REQUIRE(result->HasError());
+	REQUIRE(StringUtil::Contains(result->GetError(), "at most 255 are supported"));
+}
+
 struct FilterPushdownEcho {
 	struct GlobalState : public GlobalTableFunctionState {
 		GlobalState(optional_ptr<TableFilterSet> filters_p, vector<column_t> column_ids_p,
