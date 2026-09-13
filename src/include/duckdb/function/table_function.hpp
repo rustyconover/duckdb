@@ -147,7 +147,7 @@ struct TableFunctionBindInput {
 	//! Full positional function-argument index for a TABLE ordinal
 	DUCKDB_API idx_t GetTableArgumentIndex(idx_t table_index) const;
 	//! Generated UNION member name for a TABLE ordinal. Use the ordinal as the stable identity.
-	DUCKDB_API const Identifier &GetTableInputTag(idx_t table_index) const;
+	DUCKDB_API const Identifier &GetTableInputMemberName(idx_t table_index) const;
 	//! STRUCT type of a TABLE argument. Duplicate and empty field names are normalized by the binder.
 	DUCKDB_API const LogicalType &GetTableInputType(idx_t table_index) const;
 };

@@ -221,6 +221,7 @@ BoundStatement Binder::BindMultiTableFunctionInput(vector<BoundTableFunctionArgu
 		child_list_t<LogicalType> single_union_member;
 		single_union_member.emplace_back(union_members[table_idx].first, union_members[table_idx].second);
 		auto single_union_type = LogicalType::UNION(std::move(single_union_member));
+		// Select the member by name before casting to the full union, which disambiguates identical STRUCT types.
 		auto single_union_expression =
 		    BoundCastExpression::AddCastToType(context, std::move(struct_expression), single_union_type);
 		auto union_expression =
@@ -528,31 +529,34 @@ BoundStatement Binder::Bind(TableFunctionRef &ref) {
 	}
 	// copied out of the set: BindTableFunctionInternal fills in the bound arguments/return types
 	auto table_function = *function.functions.GetFunctionByOffset(best_function_idx.GetIndex());
-	if (!table_arguments.empty()) {
-		if (!table_function.in_out_function) {
-			throw BinderException("Function \"%s\" has TABLE parameters but is not a table-in-out function",
-			                      table_function.name);
-		}
-		idx_t table_argument_count = 0;
-		for (idx_t argument_idx = 0; argument_idx < table_function.GetArguments().size(); argument_idx++) {
-			if (table_function.GetArguments()[argument_idx] != LogicalType::TABLE) {
-				continue;
+	try {
+		if (!table_arguments.empty()) {
+			idx_t table_argument_count = 0;
+			for (idx_t argument_idx = 0; argument_idx < table_function.GetArguments().size(); argument_idx++) {
+				if (table_function.GetArguments()[argument_idx] != LogicalType::TABLE) {
+					continue;
+				}
+				if (table_argument_count >= table_arguments.size() ||
+				    table_arguments[table_argument_count].function_argument_index != argument_idx) {
+					throw BinderException("Function \"%s\" requires a subquery for every TABLE parameter",
+					                      table_function.name);
+				}
+				table_argument_count++;
 			}
-			if (table_argument_count >= table_arguments.size() ||
-			    table_arguments[table_argument_count].function_argument_index != argument_idx) {
-				throw BinderException("Function \"%s\" requires a subquery for every TABLE parameter",
+			if (table_argument_count != table_arguments.size()) {
+				throw BinderException("Function \"%s\" received a subquery outside a TABLE parameter",
 				                      table_function.name);
 			}
-			table_argument_count++;
+			if (table_arguments.size() == 1) {
+				subquery = std::move(table_arguments[0].statement);
+			} else {
+				subquery = BindMultiTableFunctionInput(std::move(table_arguments));
+			}
 		}
-		if (table_argument_count != table_arguments.size()) {
-			throw BinderException("Function \"%s\" received a subquery outside a TABLE parameter", table_function.name);
-		}
-		if (table_arguments.size() == 1) {
-			subquery = std::move(table_arguments[0].statement);
-		} else {
-			subquery = BindMultiTableFunctionInput(std::move(table_arguments));
-		}
+	} catch (std::exception &ex) {
+		error = ErrorData(ex);
+		error.AddQueryLocation(ref);
+		error.Throw();
 	}
 
 	// now check the named parameters
@@ -597,6 +601,9 @@ BoundStatement Binder::Bind(TableFunctionRef &ref) {
 	try {
 		get = BindTableFunctionInternal(table_function, ref, std::move(parameters), std::move(named_parameters),
 		                                std::move(input_table_types), std::move(input_table_names), &subquery.plan);
+		if (subquery.plan && !table_function.in_out_function) {
+			throw BinderException("Function \"%s\" did not consume its TABLE input plan", table_function.name);
+		}
 	} catch (std::exception &ex) {
 		error = ErrorData(ex);
 		// if the error does not already contain a query location, add one

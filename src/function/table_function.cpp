@@ -33,10 +33,19 @@ static bool IsValidMultiTableInput(const TableFunctionBindInput &input) {
 	    UnionType::GetMemberCount(input.input_table_types[0]) != table_count) {
 		return false;
 	}
-	for (idx_t table_idx = 0; table_idx < table_count; table_idx++) {
+	idx_t table_idx = 0;
+	for (idx_t argument_idx = 0; argument_idx < input.table_function.GetArguments().size(); argument_idx++) {
+		if (input.table_function.GetArguments()[argument_idx] != LogicalType::TABLE) {
+			continue;
+		}
 		if (UnionType::GetMemberType(input.input_table_types[0], table_idx).id() != LogicalTypeId::STRUCT) {
 			return false;
 		}
+		if (UnionType::GetMemberName(input.input_table_types[0], table_idx) !=
+		    Identifier("arg_" + to_string(argument_idx))) {
+			return false;
+		}
+		table_idx++;
 	}
 	return true;
 }
@@ -71,7 +80,7 @@ idx_t TableFunctionBindInput::GetTableArgumentIndex(idx_t table_index) const {
 	throw InvalidInputException("TABLE input index %llu is out of range", table_index);
 }
 
-const Identifier &TableFunctionBindInput::GetTableInputTag(idx_t table_index) const {
+const Identifier &TableFunctionBindInput::GetTableInputMemberName(idx_t table_index) const {
 	auto &input_type = GetMultiTableInputType(*this);
 	if (table_index >= UnionType::GetMemberCount(input_type)) {
 		throw InvalidInputException("TABLE input index %llu is out of range", table_index);

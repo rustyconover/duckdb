@@ -113,11 +113,6 @@ struct CorrelatedColumnInfo {
 	}
 };
 
-struct BoundTableFunctionArgument {
-	idx_t function_argument_index;
-	BoundStatement statement;
-};
-
 struct CorrelatedColumns {
 private:
 	using container_type = vector<CorrelatedColumnInfo>;
@@ -438,6 +433,11 @@ private:
 	idx_t depth;
 
 private:
+	struct BoundTableFunctionArgument {
+		idx_t function_argument_index;
+		BoundStatement statement;
+	};
+
 	//! Determine the depth of the binder
 	idx_t GetBinderDepth() const;
 	//! Increase the depth of the binder
