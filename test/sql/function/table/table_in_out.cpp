@@ -146,6 +146,125 @@ struct LateralStructEcho {
 	}
 };
 
+struct MultiTableEcho {
+	static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,
+	                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
+		if (!input.IsMultiTableInput()) {
+			throw InvalidInputException("Expected a multi-TABLE input");
+		}
+		for (idx_t table_idx = 0; table_idx < input.GetTableInputCount(); table_idx++) {
+			auto argument_idx = input.GetTableArgumentIndex(table_idx);
+			if (input.GetTableInputTag(table_idx) != Identifier("arg_" + to_string(argument_idx))) {
+				throw InvalidInputException("Unexpected multi-TABLE input tag");
+			}
+			if (input.GetTableInputType(table_idx).id() != LogicalTypeId::STRUCT) {
+				throw InvalidInputException("Expected STRUCT table rows");
+			}
+		}
+		return_types.emplace_back(LogicalType::UBIGINT);
+		names.emplace_back("table_index");
+		return_types.push_back(input.input_table_types[0]);
+		names.emplace_back("row_value");
+		return make_uniq<TableFunctionData>();
+	}
+
+	static OperatorResultType Function(ExecutionContext &context, TableFunctionInput &data, DataChunk &input,
+	                                   DataChunk &output) {
+		auto table_indices = FlatVector::Writer<uint64_t>(output.data[0], input.size());
+		for (idx_t row_idx = 0; row_idx < input.size(); row_idx++) {
+			idx_t table_idx;
+			if (!MultiTableFunctionInput::TryGetTableIndex(input, row_idx, table_idx)) {
+				table_indices.WriteNull();
+				continue;
+			}
+			MultiTableFunctionInput::GetTableRows(input, table_idx).GetValue(row_idx);
+			table_indices.WriteValue(table_idx);
+		}
+		output.data[1].Reference(input.data[0]);
+		output.SetChildCardinality(input.size());
+		return OperatorResultType::NEED_MORE_INPUT;
+	}
+
+	static void Register(Connection &con, const string &name, vector<LogicalType> arguments) {
+		con.BeginTransaction();
+		auto &catalog = Catalog::GetSystemCatalog(*con.context);
+		TableFunction function(Identifier(name), std::move(arguments), nullptr, Bind);
+		function.in_out_function = Function;
+		CreateTableFunctionInfo info(function);
+		catalog.CreateTableFunction(*con.context, info);
+		con.Commit();
+	}
+};
+
+TEST_CASE("Table in-out functions accept multiple TABLE parameters", "[tablefunction]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+
+	MultiTableEcho::Register(con, "multi_table_echo", {LogicalType::TABLE, LogicalType::TABLE});
+	MultiTableEcho::Register(con, "three_table_echo", {LogicalType::TABLE, LogicalType::TABLE, LogicalType::TABLE});
+	MultiTableEcho::Register(con, "mixed_table_echo", {LogicalType::TABLE, LogicalType::VARCHAR, LogicalType::TABLE});
+
+	auto unrelated = con.Query(R"(
+		SELECT table_index, row_value.arg_0.i, row_value.arg_1.s
+		FROM multi_table_echo(
+			(SELECT i FROM range(2) t(i)),
+			(SELECT s FROM (VALUES ('a'), ('b')) t(s)))
+		ORDER BY table_index, coalesce(row_value.arg_0.i, 0), row_value.arg_1.s
+	)");
+	REQUIRE_NO_FAIL(*unrelated);
+	REQUIRE(CHECK_COLUMN(unrelated, 0, {0, 0, 1, 1}));
+	REQUIRE(CHECK_COLUMN(unrelated, 1, {0, 1, Value(), Value()}));
+	REQUIRE(CHECK_COLUMN(unrelated, 2, {Value(), Value(), "a", "b"}));
+
+	auto identical = con.Query(R"(
+		SELECT table_index, row_value.arg_0.i, row_value.arg_1.i, row_value.arg_2.i
+		FROM three_table_echo(
+			(SELECT 10::INTEGER AS i),
+			(SELECT 20::INTEGER AS i),
+			(SELECT 30::INTEGER AS i))
+		ORDER BY table_index
+	)");
+	REQUIRE_NO_FAIL(*identical);
+	REQUIRE(CHECK_COLUMN(identical, 0, {0, 1, 2}));
+	REQUIRE(CHECK_COLUMN(identical, 1, {10, Value(), Value()}));
+	REQUIRE(CHECK_COLUMN(identical, 2, {Value(), 20, Value()}));
+	REQUIRE(CHECK_COLUMN(identical, 3, {Value(), Value(), 30}));
+
+	auto mixed = con.Query(R"(
+		SELECT table_index, row_value.arg_0.i, row_value.arg_2.i
+		FROM mixed_table_echo(
+			(SELECT 1::INTEGER AS i), 'label', (SELECT 2::INTEGER AS i))
+		ORDER BY table_index
+	)");
+	REQUIRE_NO_FAIL(*mixed);
+	REQUIRE(CHECK_COLUMN(mixed, 0, {0, 1}));
+	REQUIRE(CHECK_COLUMN(mixed, 1, {1, Value()}));
+	REQUIRE(CHECK_COLUMN(mixed, 2, {Value(), 2}));
+
+	auto empty = con.Query(R"(
+		SELECT table_index, row_value.arg_0.i, row_value.arg_1.i, row_value.arg_2.i
+		FROM three_table_echo(
+			(SELECT i FROM range(0) t(i)),
+			(SELECT 42::BIGINT AS i),
+			(SELECT i FROM range(0) t(i)))
+	)");
+	REQUIRE_NO_FAIL(*empty);
+	REQUIRE(CHECK_COLUMN(empty, 0, {1}));
+	REQUIRE(CHECK_COLUMN(empty, 1, {Value()}));
+	REQUIRE(CHECK_COLUMN(empty, 2, {42}));
+	REQUIRE(CHECK_COLUMN(empty, 3, {Value()}));
+
+	auto duplicate_names = con.Query(R"(
+		SELECT row_value.arg_0.a, row_value.arg_0.a_1
+		FROM multi_table_echo(
+			(SELECT 1 AS a, 2 AS a),
+			(SELECT NULL::INTEGER AS unused WHERE false))
+	)");
+	REQUIRE_NO_FAIL(*duplicate_names);
+	REQUIRE(CHECK_COLUMN(duplicate_names, 0, {1}));
+	REQUIRE(CHECK_COLUMN(duplicate_names, 1, {2}));
+}
+
 struct FilterPushdownEcho {
 	struct GlobalState : public GlobalTableFunctionState {
 		GlobalState(optional_ptr<TableFilterSet> filters_p, vector<column_t> column_ids_p,

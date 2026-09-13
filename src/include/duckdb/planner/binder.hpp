@@ -113,6 +113,11 @@ struct CorrelatedColumnInfo {
 	}
 };
 
+struct BoundTableFunctionArgument {
+	idx_t function_argument_index;
+	BoundStatement statement;
+};
+
 struct CorrelatedColumns {
 private:
 	using container_type = vector<CorrelatedColumnInfo>;
@@ -581,8 +586,10 @@ private:
 	bool BindTableFunctionParameters(TableFunctionCatalogEntry &table_function,
 	                                 vector<unique_ptr<ParsedExpression>> &expressions, vector<LogicalType> &arguments,
 	                                 vector<Value> &parameters, named_parameter_map_t &named_parameters,
-	                                 BoundStatement &subquery, ErrorData &error);
+	                                 BoundStatement &subquery, vector<BoundTableFunctionArgument> &table_arguments,
+	                                 ErrorData &error);
 	void BindTableInTableOutFunction(vector<unique_ptr<ParsedExpression>> &expressions, BoundStatement &subquery);
+	BoundStatement BindMultiTableFunctionInput(vector<BoundTableFunctionArgument> table_arguments);
 	BoundStatement BindTableFunction(TableFunction &function, vector<Value> parameters);
 	BoundStatement BindTableFunctionInternal(TableFunction &table_function, const TableFunctionRef &ref,
 	                                         vector<Value> parameters, named_parameter_map_t named_parameters,

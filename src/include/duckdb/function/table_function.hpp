@@ -139,6 +139,25 @@ struct TableFunctionBindInput {
 	bool HasExpectedSchema() const {
 		return expected_names && expected_types;
 	}
+
+	//! Whether this bind input represents two or more fixed TABLE arguments lowered to a tagged UNION of STRUCTs
+	DUCKDB_API bool IsMultiTableInput() const;
+	//! Number of TABLE arguments represented by this input
+	DUCKDB_API idx_t GetTableInputCount() const;
+	//! Full positional function-argument index for a TABLE ordinal
+	DUCKDB_API idx_t GetTableArgumentIndex(idx_t table_index) const;
+	//! Generated UNION member name for a TABLE ordinal. Use the ordinal as the stable identity.
+	DUCKDB_API const Identifier &GetTableInputTag(idx_t table_index) const;
+	//! STRUCT type of a TABLE argument. Duplicate and empty field names are normalized by the binder.
+	DUCKDB_API const LogicalType &GetTableInputType(idx_t table_index) const;
+};
+
+//! Runtime accessors for the tagged UNION input passed to functions with multiple TABLE arguments
+struct MultiTableFunctionInput {
+	//! Reads the TABLE ordinal for a row. Returns false only for a NULL union value.
+	DUCKDB_API static bool TryGetTableIndex(const DataChunk &input, idx_t row_index, idx_t &table_index);
+	//! Returns the STRUCT member vector for a TABLE ordinal. Row indices are unchanged; other members are NULL.
+	DUCKDB_API static const Vector &GetTableRows(const DataChunk &input, idx_t table_index);
 };
 
 struct TableFunctionInitInput {
@@ -357,6 +376,8 @@ typedef unique_ptr<BaseStatistics> (*table_statistics_extended_t)(ClientContext 
 typedef void (*table_function_t)(ClientContext &context, TableFunctionInput &data, DataChunk &output);
 typedef OperatorResultType (*table_in_out_function_t)(ExecutionContext &context, TableFunctionInput &data,
                                                       DataChunk &input, DataChunk &output);
+//! Finalization is per pipeline/local state. With multiple TABLE inputs, branches can run concurrently and out of
+//! order, empty inputs invoke no row callback, and this callback does not signal per-input or all-input completion.
 typedef OperatorFinalizeResultType (*table_in_out_function_final_t)(ExecutionContext &context, TableFunctionInput &data,
                                                                     DataChunk &output);
 typedef OperatorPartitionData (*table_function_get_partition_data_t)(ClientContext &context,

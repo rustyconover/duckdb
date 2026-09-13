@@ -10,11 +10,17 @@
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression_binder/table_function_binder.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/planner/operator/logical_set_operation.hpp"
 #include "duckdb/function/function_binder.hpp"
+#include "duckdb/function/scalar/struct_functions.hpp"
 #include "duckdb/function/window/rows_functions.hpp"
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/main/query_result.hpp"
 
 #include "duckdb/planner/expression/bound_window_expression.hpp"
 #include "duckdb/planner/operator/logical_window.hpp"
@@ -88,7 +94,7 @@ bool Binder::BindTableFunctionParameters(TableFunctionCatalogEntry &table_functi
                                          vector<unique_ptr<ParsedExpression>> &expressions,
                                          vector<LogicalType> &arguments, vector<Value> &parameters,
                                          named_parameter_map_t &named_parameters, BoundStatement &subquery,
-                                         ErrorData &error) {
+                                         vector<BoundTableFunctionArgument> &table_arguments, ErrorData &error) {
 	auto bind_type = GetTableFunctionBindType(table_function, expressions);
 	if (bind_type == TableFunctionBindType::TABLE_IN_OUT_FUNCTION) {
 		// bind table in-out function
@@ -97,7 +103,6 @@ bool Binder::BindTableFunctionParameters(TableFunctionCatalogEntry &table_functi
 		arguments = subquery.types;
 		return true;
 	}
-	bool seen_subquery = false;
 	for (auto &child : expressions) {
 		Identifier parameter_name;
 
@@ -125,16 +130,14 @@ bool Binder::BindTableFunctionParameters(TableFunctionCatalogEntry &table_functi
 				    "Only table-in-out functions can have subquery parameters - %s only accepts constant parameters",
 				    fun.GetName());
 			}
-			if (seen_subquery) {
-				error = ErrorData("Table function can have at most one subquery parameter");
-				return false;
-			}
 			auto binder = Binder::CreateBinder(this->context, this);
 			binder->SetCanContainNulls(true);
 			auto &se = child->Cast<SubqueryExpression>();
-			subquery = binder->BindNode(*se.Subquery()->node);
+			BoundTableFunctionArgument table_argument;
+			table_argument.function_argument_index = arguments.size();
+			table_argument.statement = binder->BindNode(*se.Subquery()->node);
 			MoveCorrelatedExpressions(*binder);
-			seen_subquery = true;
+			table_arguments.push_back(std::move(table_argument));
 			arguments.emplace_back(LogicalTypeId::TABLE);
 			parameters.emplace_back();
 			continue;
@@ -164,6 +167,78 @@ bool Binder::BindTableFunctionParameters(TableFunctionCatalogEntry &table_functi
 		}
 	}
 	return true;
+}
+
+BoundStatement Binder::BindMultiTableFunctionInput(vector<BoundTableFunctionArgument> table_arguments) {
+	if (table_arguments.size() > UnionType::MAX_UNION_MEMBERS) {
+		throw BinderException("Table function has %llu TABLE parameters, but at most %llu are supported",
+		                      table_arguments.size(), UnionType::MAX_UNION_MEMBERS);
+	}
+
+	vector<vector<Identifier>> input_names;
+	child_list_t<LogicalType> union_members;
+	input_names.reserve(table_arguments.size());
+	union_members.reserve(table_arguments.size());
+	for (auto &table_argument : table_arguments) {
+		auto names = table_argument.statement.names;
+		for (idx_t column_idx = 0; column_idx < names.size(); column_idx++) {
+			if (names[column_idx].empty()) {
+				names[column_idx] = Identifier("column" + to_string(column_idx));
+			}
+		}
+		QueryResult::DeduplicateColumns(names);
+
+		child_list_t<LogicalType> struct_children;
+		for (idx_t column_idx = 0; column_idx < table_argument.statement.types.size(); column_idx++) {
+			struct_children.emplace_back(names[column_idx], table_argument.statement.types[column_idx]);
+		}
+		auto member_name = Identifier("arg_" + to_string(table_argument.function_argument_index));
+		union_members.emplace_back(member_name, LogicalType::STRUCT(std::move(struct_children)));
+		input_names.push_back(std::move(names));
+	}
+	auto union_type = LogicalType::UNION(union_members);
+
+	vector<unique_ptr<LogicalOperator>> union_children;
+	union_children.reserve(table_arguments.size());
+	for (idx_t table_idx = 0; table_idx < table_arguments.size(); table_idx++) {
+		auto &table_argument = table_arguments[table_idx];
+		auto column_bindings = table_argument.statement.plan->GetColumnBindings();
+		if (column_bindings.size() != table_argument.statement.types.size()) {
+			throw InternalException("Table function input column bindings do not match its types");
+		}
+
+		vector<unique_ptr<Expression>> struct_children;
+		struct_children.reserve(column_bindings.size());
+		for (idx_t column_idx = 0; column_idx < column_bindings.size(); column_idx++) {
+			struct_children.push_back(make_uniq<BoundColumnRefExpression>(input_names[table_idx][column_idx],
+			                                                              table_argument.statement.types[column_idx],
+			                                                              column_bindings[column_idx]));
+		}
+		FunctionBinder function_binder(*this);
+		auto struct_expression =
+		    function_binder.BindScalarFunction(StructPackFun::GetFunction(), std::move(struct_children), false, this);
+
+		child_list_t<LogicalType> single_union_member;
+		single_union_member.emplace_back(union_members[table_idx].first, union_members[table_idx].second);
+		auto single_union_type = LogicalType::UNION(std::move(single_union_member));
+		auto single_union_expression =
+		    BoundCastExpression::AddCastToType(context, std::move(struct_expression), single_union_type);
+		auto union_expression =
+		    BoundCastExpression::AddCastToType(context, std::move(single_union_expression), union_type);
+
+		vector<unique_ptr<Expression>> projection_expressions;
+		projection_expressions.push_back(std::move(union_expression));
+		auto projection = make_uniq<LogicalProjection>(GenerateTableIndex(), std::move(projection_expressions));
+		projection->children.push_back(std::move(table_argument.statement.plan));
+		union_children.push_back(std::move(projection));
+	}
+
+	BoundStatement result;
+	result.names.emplace_back("input");
+	result.types.push_back(union_type);
+	result.plan = make_uniq<LogicalSetOperation>(GenerateTableIndex(), 1, std::move(union_children),
+	                                             LogicalOperatorType::LOGICAL_UNION, true);
+	return result;
 }
 
 static string GetAlias(const TableFunctionRef &ref) {
@@ -430,6 +505,7 @@ BoundStatement Binder::Bind(TableFunctionRef &ref) {
 	vector<Value> parameters;
 	named_parameter_map_t named_parameters;
 	BoundStatement subquery;
+	vector<BoundTableFunctionArgument> table_arguments;
 	ErrorData error;
 
 	vector<unique_ptr<ParsedExpression>> children;
@@ -437,7 +513,8 @@ BoundStatement Binder::Bind(TableFunctionRef &ref) {
 		children.push_back(std::move(child.GetExpressionMutable()));
 	}
 
-	if (!BindTableFunctionParameters(function, children, arguments, parameters, named_parameters, subquery, error)) {
+	if (!BindTableFunctionParameters(function, children, arguments, parameters, named_parameters, subquery,
+	                                 table_arguments, error)) {
 		error.AddQueryLocation(ref);
 		error.Throw();
 	}
@@ -451,6 +528,32 @@ BoundStatement Binder::Bind(TableFunctionRef &ref) {
 	}
 	// copied out of the set: BindTableFunctionInternal fills in the bound arguments/return types
 	auto table_function = *function.functions.GetFunctionByOffset(best_function_idx.GetIndex());
+	if (!table_arguments.empty()) {
+		if (!table_function.in_out_function) {
+			throw BinderException("Function \"%s\" has TABLE parameters but is not a table-in-out function",
+			                      table_function.name);
+		}
+		idx_t table_argument_count = 0;
+		for (idx_t argument_idx = 0; argument_idx < table_function.GetArguments().size(); argument_idx++) {
+			if (table_function.GetArguments()[argument_idx] != LogicalType::TABLE) {
+				continue;
+			}
+			if (table_argument_count >= table_arguments.size() ||
+			    table_arguments[table_argument_count].function_argument_index != argument_idx) {
+				throw BinderException("Function \"%s\" requires a subquery for every TABLE parameter",
+				                      table_function.name);
+			}
+			table_argument_count++;
+		}
+		if (table_argument_count != table_arguments.size()) {
+			throw BinderException("Function \"%s\" received a subquery outside a TABLE parameter", table_function.name);
+		}
+		if (table_arguments.size() == 1) {
+			subquery = std::move(table_arguments[0].statement);
+		} else {
+			subquery = BindMultiTableFunctionInput(std::move(table_arguments));
+		}
+	}
 
 	// now check the named parameters
 	BindNamedParameters(table_function.named_parameters, named_parameters, error_context, table_function.name);
