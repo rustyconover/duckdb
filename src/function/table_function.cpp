@@ -1,6 +1,6 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/function/partition_stats.hpp"
-#include "duckdb/common/vector/union_vector.hpp"
+#include "duckdb/planner/logical_operator.hpp"
 
 namespace duckdb {
 
@@ -16,117 +16,22 @@ PartitionStatistics::PartitionStatistics() : row_start(0), count(0), count_type(
 TableFunctionInfo::~TableFunctionInfo() {
 }
 
-static idx_t CountTableArguments(const TableFunction &function) {
-	idx_t count = 0;
-	for (auto &argument : function.GetArguments()) {
-		if (argument == LogicalType::TABLE) {
-			count++;
-		}
-	}
-	return count;
+const vector<TableFunctionInputRelation> &TableFunctionBindInput::InputRelations() const {
+	static const vector<TableFunctionInputRelation> empty_relations;
+	return input_relations ? *input_relations : empty_relations;
 }
 
-static bool IsValidMultiTableInput(const TableFunctionBindInput &input) {
-	auto table_count = CountTableArguments(input.table_function);
-	if (table_count < 2 || input.input_table_types.size() != 1 ||
-	    input.input_table_types[0].id() != LogicalTypeId::UNION ||
-	    UnionType::GetMemberCount(input.input_table_types[0]) != table_count) {
-		return false;
+unique_ptr<LogicalOperator> TableFunctionBindInput::TakeInputPlan(idx_t relation_index) {
+	if (!input_relations || relation_index >= input_relations->size()) {
+		throw InternalException("Function \"%s\" has no TABLE argument %llu to take", table_function.name,
+		                        relation_index);
 	}
-	idx_t table_idx = 0;
-	for (idx_t argument_idx = 0; argument_idx < input.table_function.GetArguments().size(); argument_idx++) {
-		if (input.table_function.GetArguments()[argument_idx] != LogicalType::TABLE) {
-			continue;
-		}
-		if (UnionType::GetMemberType(input.input_table_types[0], table_idx).id() != LogicalTypeId::STRUCT) {
-			return false;
-		}
-		if (UnionType::GetMemberName(input.input_table_types[0], table_idx) !=
-		    Identifier("arg_" + to_string(argument_idx))) {
-			return false;
-		}
-		table_idx++;
+	auto &relation = (*input_relations)[relation_index];
+	if (!relation.plan) {
+		throw InternalException("Function \"%s\" already took the plan of TABLE argument %llu", table_function.name,
+		                        relation.argument_index);
 	}
-	return true;
-}
-
-static const LogicalType &GetMultiTableInputType(const TableFunctionBindInput &input) {
-	if (!IsValidMultiTableInput(input)) {
-		throw InvalidInputException("Table function bind input is not a valid multi-TABLE input");
-	}
-	return input.input_table_types[0];
-}
-
-bool TableFunctionBindInput::IsMultiTableInput() const {
-	return IsValidMultiTableInput(*this);
-}
-
-idx_t TableFunctionBindInput::GetTableInputCount() const {
-	return UnionType::GetMemberCount(GetMultiTableInputType(*this));
-}
-
-idx_t TableFunctionBindInput::GetTableArgumentIndex(idx_t table_index) const {
-	GetMultiTableInputType(*this);
-	idx_t table_ordinal = 0;
-	for (idx_t argument_idx = 0; argument_idx < table_function.GetArguments().size(); argument_idx++) {
-		if (table_function.GetArguments()[argument_idx] != LogicalType::TABLE) {
-			continue;
-		}
-		if (table_ordinal == table_index) {
-			return argument_idx;
-		}
-		table_ordinal++;
-	}
-	throw InvalidInputException("TABLE input index %llu is out of range", table_index);
-}
-
-const Identifier &TableFunctionBindInput::GetTableInputMemberName(idx_t table_index) const {
-	auto &input_type = GetMultiTableInputType(*this);
-	if (table_index >= UnionType::GetMemberCount(input_type)) {
-		throw InvalidInputException("TABLE input index %llu is out of range", table_index);
-	}
-	return UnionType::GetMemberName(input_type, table_index);
-}
-
-const LogicalType &TableFunctionBindInput::GetTableInputType(idx_t table_index) const {
-	auto &input_type = GetMultiTableInputType(*this);
-	if (table_index >= UnionType::GetMemberCount(input_type)) {
-		throw InvalidInputException("TABLE input index %llu is out of range", table_index);
-	}
-	return UnionType::GetMemberType(input_type, table_index);
-}
-
-static const Vector &GetMultiTableVector(const DataChunk &input) {
-	if (input.ColumnCount() != 1 || input.data[0].GetType().id() != LogicalTypeId::UNION) {
-		throw InvalidInputException("Multi-TABLE function input must contain one UNION column");
-	}
-	for (idx_t table_idx = 0; table_idx < UnionType::GetMemberCount(input.data[0].GetType()); table_idx++) {
-		if (UnionType::GetMemberType(input.data[0].GetType(), table_idx).id() != LogicalTypeId::STRUCT) {
-			throw InvalidInputException("Multi-TABLE function input UNION members must be STRUCTs");
-		}
-	}
-	return input.data[0];
-}
-
-bool MultiTableFunctionInput::TryGetTableIndex(const DataChunk &input, idx_t row_index, idx_t &table_index) {
-	if (row_index >= input.size()) {
-		throw InvalidInputException("Multi-TABLE input row index %llu is out of range", row_index);
-	}
-	auto &input_vector = GetMultiTableVector(input);
-	union_tag_t tag;
-	if (!UnionVector::TryGetTag(input_vector, row_index, tag)) {
-		return false;
-	}
-	table_index = tag;
-	return true;
-}
-
-const Vector &MultiTableFunctionInput::GetTableRows(const DataChunk &input, idx_t table_index) {
-	auto &input_vector = GetMultiTableVector(input);
-	if (table_index >= UnionType::GetMemberCount(input_vector.GetType())) {
-		throw InvalidInputException("TABLE input index %llu is out of range", table_index);
-	}
-	return UnionVector::GetMember(input_vector, table_index);
+	return std::move(relation.plan);
 }
 
 TableFunction::TableFunction(Identifier name, const vector<LogicalType> &arguments, table_function_t function_,

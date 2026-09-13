@@ -59,6 +59,7 @@ class LogicalVacuum;
 class ColumnList;
 class ExternalDependency;
 class TableFunction;
+struct TableFunctionInputRelation;
 class TableStorageInfo;
 class BoundConstraint;
 class AtClause;
@@ -589,13 +590,13 @@ private:
 	                                 BoundStatement &subquery, vector<BoundTableFunctionArgument> &table_arguments,
 	                                 ErrorData &error);
 	void BindTableInTableOutFunction(vector<unique_ptr<ParsedExpression>> &expressions, BoundStatement &subquery);
-	BoundStatement BindMultiTableFunctionInput(vector<BoundTableFunctionArgument> table_arguments);
 	BoundStatement BindTableFunction(TableFunction &function, vector<Value> parameters);
 	BoundStatement BindTableFunctionInternal(TableFunction &table_function, const TableFunctionRef &ref,
 	                                         vector<Value> parameters, named_parameter_map_t named_parameters,
 	                                         vector<LogicalType> input_table_types,
 	                                         vector<Identifier> input_table_names,
-	                                         optional_ptr<unique_ptr<LogicalOperator>> input_plan);
+	                                         optional_ptr<unique_ptr<LogicalOperator>> input_plan,
+	                                         optional_ptr<vector<TableFunctionInputRelation>> input_relations);
 
 	unique_ptr<LogicalOperator> CreatePlan(BoundJoinRef &ref);
 
