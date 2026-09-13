@@ -2,7 +2,11 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/vector/vector_writer.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/planner/operator/logical_cross_product.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/planner/table_filter_set.hpp"
 #include "test_helpers.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
@@ -145,6 +149,266 @@ struct LateralStructEcho {
 		con.Commit();
 	}
 };
+
+// Builds a genuine N-child operator from the bound TABLE arguments: a nested cross
+// product of every input, capped with a projection at the function's bind index.
+struct MultiTableCrossProduct {
+	static unique_ptr<LogicalOperator> BindOperator(ClientContext &context, TableFunctionBindInput &input,
+	                                                TableIndex bind_index, vector<Identifier> &return_names) {
+		auto &relations = input.InputRelations();
+		if (relations.size() < 2) {
+			throw InvalidInputException("Expected at least two TABLE arguments");
+		}
+		unique_ptr<LogicalOperator> combined;
+		vector<unique_ptr<Expression>> projections;
+		for (idx_t relation_idx = 0; relation_idx < relations.size(); relation_idx++) {
+			auto &relation = relations[relation_idx];
+			if (relation.types.size() != relation.names.size()) {
+				throw InvalidInputException("TABLE argument schema is inconsistent");
+			}
+			auto bindings = relation.plan->GetColumnBindings();
+			for (idx_t column_idx = 0; column_idx < bindings.size(); column_idx++) {
+				auto name = Identifier("arg" + to_string(relation.argument_index) + "_" +
+				                       relation.names[column_idx].GetIdentifierName());
+				projections.push_back(
+				    make_uniq<BoundColumnRefExpression>(name, relation.types[column_idx], bindings[column_idx]));
+				return_names.push_back(name);
+			}
+			// consume the plan - the binder verifies every TABLE argument was taken
+			auto child = input.TakeInputPlan(relation_idx);
+			combined = combined ? LogicalCrossProduct::Create(std::move(combined), std::move(child)) : std::move(child);
+		}
+		auto projection = make_uniq<LogicalProjection>(bind_index, std::move(projections));
+		projection->children.push_back(std::move(combined));
+		return std::move(projection);
+	}
+
+	static void Register(Connection &con, const string &name, vector<LogicalType> arguments) {
+		con.BeginTransaction();
+		auto &catalog = Catalog::GetSystemCatalog(*con.context);
+		TableFunction function(Identifier(name), std::move(arguments), nullptr, nullptr);
+		function.bind_operator = BindOperator;
+		CreateTableFunctionInfo info(function);
+		catalog.CreateTableFunction(*con.context, info);
+		con.Commit();
+	}
+};
+
+// Consumes only its first TABLE argument - the binder must reject the leftover plan.
+struct MultiTablePartialBindOperator {
+	static unique_ptr<LogicalOperator> BindOperator(ClientContext &context, TableFunctionBindInput &input,
+	                                                TableIndex bind_index, vector<Identifier> &return_names) {
+		auto &first = input.InputRelations()[0];
+		auto bindings = first.plan->GetColumnBindings();
+		vector<unique_ptr<Expression>> projections;
+		for (idx_t column_idx = 0; column_idx < bindings.size(); column_idx++) {
+			projections.push_back(make_uniq<BoundColumnRefExpression>(first.names[column_idx], first.types[column_idx],
+			                                                          bindings[column_idx]));
+			return_names.push_back(first.names[column_idx]);
+		}
+		auto projection = make_uniq<LogicalProjection>(bind_index, std::move(projections));
+		projection->children.push_back(input.TakeInputPlan(0));
+		// the second TABLE argument's plan is deliberately left behind
+		return std::move(projection);
+	}
+
+	static void Register(Connection &con, const string &name, vector<LogicalType> arguments) {
+		con.BeginTransaction();
+		auto &catalog = Catalog::GetSystemCatalog(*con.context);
+		TableFunction function(Identifier(name), std::move(arguments), nullptr, nullptr);
+		function.bind_operator = BindOperator;
+		CreateTableFunctionInfo info(function);
+		catalog.CreateTableFunction(*con.context, info);
+		con.Commit();
+	}
+};
+
+struct TableInputBindOperator {
+	static unique_ptr<LogicalOperator> BindOperator(ClientContext &context, TableFunctionBindInput &input,
+	                                                TableIndex bind_index, vector<Identifier> &return_names) {
+		if (!input.input_plan || !*input.input_plan) {
+			throw InvalidInputException("Expected a TABLE input plan");
+		}
+		auto child = std::move(*input.input_plan);
+		auto bindings = child->GetColumnBindings();
+		if (bindings.size() != input.input_table_types.size()) {
+			throw InvalidInputException("Unexpected TABLE input schema");
+		}
+		vector<unique_ptr<Expression>> expressions;
+		for (idx_t column_idx = 0; column_idx < bindings.size(); column_idx++) {
+			expressions.push_back(make_uniq<BoundColumnRefExpression>(
+			    input.input_table_names[column_idx], input.input_table_types[column_idx], bindings[column_idx]));
+		}
+		return_names = input.input_table_names;
+		auto projection = make_uniq<LogicalProjection>(bind_index, std::move(expressions));
+		projection->children.push_back(std::move(child));
+		return std::move(projection);
+	}
+
+	static void Register(Connection &con, const string &name, vector<LogicalType> arguments) {
+		con.BeginTransaction();
+		auto &catalog = Catalog::GetSystemCatalog(*con.context);
+		TableFunction function(Identifier(name), std::move(arguments), nullptr, nullptr);
+		function.bind_operator = BindOperator;
+		CreateTableFunctionInfo info(function);
+		catalog.CreateTableFunction(*con.context, info);
+		con.Commit();
+	}
+};
+
+TEST_CASE("TABLE bind operators receive a single bound input plan", "[tablefunction]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	TableInputBindOperator::Register(con, "single_table_bind_operator", {LogicalType::TABLE});
+
+	auto single = con.Query(R"(
+		SELECT i, s FROM single_table_bind_operator(
+			(SELECT 42 AS i, 'value' AS s))
+	)");
+	REQUIRE_NO_FAIL(*single);
+	REQUIRE(CHECK_COLUMN(single, 0, {42}));
+	REQUIRE(CHECK_COLUMN(single, 1, {"value"}));
+}
+
+TEST_CASE("Bind operators receive every bound TABLE argument", "[tablefunction]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	MultiTableCrossProduct::Register(con, "multi_table_pair", {LogicalType::TABLE, LogicalType::TABLE});
+	MultiTableCrossProduct::Register(con, "multi_table_triple",
+	                                 {LogicalType::TABLE, LogicalType::TABLE, LogicalType::TABLE});
+	MultiTableCrossProduct::Register(con, "multi_table_mixed",
+	                                 {LogicalType::TABLE, LogicalType::VARCHAR, LogicalType::TABLE});
+	REQUIRE_NO_FAIL(*con.Query("SET debug_verify_serializer=true"));
+
+	// two inputs with distinct schemas, both reachable
+	auto pair = con.Query(R"(
+		SELECT arg0_i, arg1_s
+		FROM multi_table_pair((SELECT i FROM range(2) t(i)), (SELECT s FROM (VALUES ('a'), ('b')) t(s)))
+		ORDER BY arg0_i, arg1_s
+	)");
+	REQUIRE_NO_FAIL(*pair);
+	REQUIRE(CHECK_COLUMN(pair, 0, {0, 0, 1, 1}));
+	REQUIRE(CHECK_COLUMN(pair, 1, {"a", "b", "a", "b"}));
+
+	// three inputs with identical schemas stay distinguishable by argument position
+	auto triple = con.Query(R"(
+		SELECT arg0_i, arg1_i, arg2_i
+		FROM multi_table_triple((SELECT 10::INTEGER AS i), (SELECT 20::INTEGER AS i), (SELECT 30::INTEGER AS i))
+	)");
+	REQUIRE_NO_FAIL(*triple);
+	REQUIRE(CHECK_COLUMN(triple, 0, {10}));
+	REQUIRE(CHECK_COLUMN(triple, 1, {20}));
+	REQUIRE(CHECK_COLUMN(triple, 2, {30}));
+
+	// a scalar argument between two TABLE arguments keeps the positional indexes
+	auto mixed = con.Query(R"(
+		SELECT arg0_i, arg2_i
+		FROM multi_table_mixed((SELECT 1::INTEGER AS i), 'label', (SELECT 2::INTEGER AS i))
+	)");
+	REQUIRE_NO_FAIL(*mixed);
+	REQUIRE(CHECK_COLUMN(mixed, 0, {1}));
+	REQUIRE(CHECK_COLUMN(mixed, 1, {2}));
+
+	// an empty input propagates through the operator the function built
+	auto empty = con.Query(R"(
+		SELECT count(*) FROM multi_table_pair((SELECT i FROM range(0) t(i)), (SELECT 42::BIGINT AS i))
+	)");
+	REQUIRE_NO_FAIL(*empty);
+	REQUIRE(CHECK_COLUMN(empty, 0, {0}));
+
+	// multiple vectors per input
+	auto many = con.Query(R"(
+		SELECT count(*) FROM multi_table_pair((SELECT i FROM range(5000) t(i)), (SELECT i FROM range(3) t(i)))
+	)");
+	REQUIRE_NO_FAIL(*many);
+	REQUIRE(CHECK_COLUMN(many, 0, {15000}));
+
+	// nested types survive the handover
+	auto nested = con.Query(R"(
+		SELECT arg0_items, arg1_nested.x
+		FROM multi_table_pair((SELECT [1, NULL]::INTEGER[] AS items), (SELECT {'x': 42::INTEGER} AS nested))
+	)");
+	REQUIRE_NO_FAIL(*nested);
+	REQUIRE(CHECK_COLUMN(nested, 0, {Value::LIST(LogicalType::INTEGER, {1, Value()})}));
+	REQUIRE(CHECK_COLUMN(nested, 1, {42}));
+}
+
+TEST_CASE("Correlated TABLE arguments reach the bind operator", "[tablefunction]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	MultiTableCrossProduct::Register(con, "multi_table_lateral", {LogicalType::TABLE, LogicalType::TABLE});
+
+	auto same_outer = con.Query(R"(
+		SELECT outer_rows.i, echoed.arg0_v, echoed.arg1_v
+		FROM range(2) outer_rows(i), LATERAL multi_table_lateral(
+			(SELECT outer_rows.i AS v), (SELECT outer_rows.i AS v)) echoed
+		ORDER BY outer_rows.i
+	)");
+	REQUIRE_NO_FAIL(*same_outer);
+	REQUIRE(CHECK_COLUMN(same_outer, 0, {0, 1}));
+	REQUIRE(CHECK_COLUMN(same_outer, 1, {0, 1}));
+	REQUIRE(CHECK_COLUMN(same_outer, 2, {0, 1}));
+
+	auto different_outer = con.Query(R"(
+		SELECT outer_rows.i, echoed.arg0_v, echoed.arg1_v
+		FROM (VALUES (0, 100), (1, 101)) outer_rows(i, j), LATERAL multi_table_lateral(
+			(SELECT outer_rows.i AS v), (SELECT outer_rows.j AS v)) echoed
+		ORDER BY outer_rows.i
+	)");
+	REQUIRE_NO_FAIL(*different_outer);
+	REQUIRE(CHECK_COLUMN(different_outer, 1, {0, 1}));
+	REQUIRE(CHECK_COLUMN(different_outer, 2, {100, 101}));
+
+	// only one side correlated
+	auto mixed = con.Query(R"(
+		SELECT outer_rows.i, echoed.arg0_v, echoed.arg1_v
+		FROM range(2) outer_rows(i), LATERAL multi_table_lateral(
+			(SELECT outer_rows.i AS v), (SELECT 42::BIGINT AS v)) echoed
+		ORDER BY outer_rows.i
+	)");
+	REQUIRE_NO_FAIL(*mixed);
+	REQUIRE(CHECK_COLUMN(mixed, 1, {0, 1}));
+	REQUIRE(CHECK_COLUMN(mixed, 2, {42, 42}));
+
+	// a correlated input that produces no rows
+	auto correlated_empty = con.Query(R"(
+		SELECT count(*)
+		FROM range(2) outer_rows(i), LATERAL multi_table_lateral(
+			(SELECT outer_rows.i AS v WHERE false), (SELECT outer_rows.i + 10 AS v)) echoed
+	)");
+	REQUIRE_NO_FAIL(*correlated_empty);
+	REQUIRE(CHECK_COLUMN(correlated_empty, 0, {0}));
+}
+
+TEST_CASE("Multiple TABLE arguments require a bind operator", "[tablefunction]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+
+	con.BeginTransaction();
+	{
+		auto &catalog = Catalog::GetSystemCatalog(*con.context);
+		TableFunction function("multi_table_in_out", {LogicalType::TABLE, LogicalType::TABLE}, nullptr,
+		                       LateralStructEcho::Bind);
+		function.in_out_function = LateralStructEcho::Function;
+		CreateTableFunctionInfo info(function);
+		catalog.CreateTableFunction(*con.context, info);
+	}
+	con.Commit();
+
+	auto rejected = con.Query("SELECT * FROM multi_table_in_out((SELECT 1 AS a), (SELECT 2 AS b))");
+	REQUIRE(rejected->HasError());
+	REQUIRE(StringUtil::Contains(rejected->GetError(), "bind_operator"));
+}
+
+TEST_CASE("Unconsumed TABLE arguments are rejected", "[tablefunction]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	MultiTablePartialBindOperator::Register(con, "multi_table_leaks", {LogicalType::TABLE, LogicalType::TABLE});
+
+	auto leaked = con.Query("SELECT * FROM multi_table_leaks((SELECT 1 AS a), (SELECT 2 AS b))");
+	REQUIRE(leaked->HasError());
+	REQUIRE(StringUtil::Contains(leaked->GetError(), "did not consume"));
+}
 
 struct FilterPushdownEcho {
 	struct GlobalState : public GlobalTableFunctionState {
