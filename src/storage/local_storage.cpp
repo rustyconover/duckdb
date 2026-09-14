@@ -1,4 +1,5 @@
 #include "duckdb/transaction/local_storage.hpp"
+#include "duckdb/catalog/catalog.hpp"
 #include "duckdb/transaction/commit_state.hpp"
 
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
@@ -80,12 +81,13 @@ LocalTableStorage::LocalTableStorage(ClientContext &context, DataTable &new_dt, 
 LocalTableStorage::~LocalTableStorage() {
 }
 
-void LocalTableStorage::InitializeScan(CollectionScanState &state, optional_ptr<TableFilterSet> table_filters) {
+void LocalTableStorage::InitializeScan(const QueryContext &scan_context, CollectionScanState &state,
+                                       optional_ptr<TableFilterSet> table_filters) {
 	auto &collection = *row_groups->collection;
 	if (collection.GetTotalRows() == 0) {
 		throw InternalException("No rows in LocalTableStorage row group for scan");
 	}
-	collection.InitializeScan(context, state, state.GetColumnIds(), table_filters.get());
+	collection.InitializeScan(scan_context, state, state.GetColumnIds(), table_filters.get());
 }
 
 idx_t LocalTableStorage::EstimatedSize() const {
@@ -369,13 +371,13 @@ LocalStorage &LocalStorage::Get(ClientContext &context, Catalog &catalog) {
 	return LocalStorage::Get(context, catalog.GetAttached());
 }
 
-void LocalStorage::InitializeScan(DataTable &table, CollectionScanState &state,
+void LocalStorage::InitializeScan(const QueryContext &scan_context, DataTable &table, CollectionScanState &state,
                                   optional_ptr<TableFilterSet> table_filters) {
 	auto storage = table_manager.GetStorage(table);
 	if (storage == nullptr || storage->GetCollection().GetTotalRows() == 0) {
 		return;
 	}
-	storage->InitializeScan(state, table_filters);
+	storage->InitializeScan(scan_context, state, table_filters);
 }
 
 void LocalStorage::Scan(CollectionScanState &state, const vector<StorageIndex> &, DataChunk &result) {
@@ -401,13 +403,14 @@ OptimisticWriteCollection &LocalTableStorage::GetPrimaryCollection() {
 	return *row_groups;
 }
 
-bool LocalStorage::NextParallelScan(ClientContext &context, DataTable &table, ParallelCollectionScanState &state,
-                                    CollectionScanState &scan_state) {
+optional_idx LocalStorage::NextParallelScan(ClientContext &context, DataTable &table,
+                                            ParallelCollectionScanState &state, CollectionScanState &scan_state,
+                                            bool initialize_columns) {
 	auto storage = table_manager.GetStorage(table);
 	if (!storage) {
-		return false;
+		return optional_idx();
 	}
-	return storage->GetCollection().NextParallelScan(context, state, scan_state);
+	return storage->GetCollection().NextParallelScan(context, state, scan_state, initialize_columns);
 }
 
 void LocalStorage::InitializeAppend(LocalAppendState &state, DataTable &table, DuckTableEntry &table_entry) {

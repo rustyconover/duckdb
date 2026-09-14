@@ -1,4 +1,5 @@
 #include "duckdb/storage/data_table.hpp"
+#include "duckdb/planner/binder.hpp"
 #include "duckdb/storage/table/data_table_info.hpp"
 #include "duckdb/transaction/commit_state.hpp"
 
@@ -268,7 +269,7 @@ void DataTable::InitializeScan(ClientContext &context, DuckTransaction &transact
 	auto &local_storage = LocalStorage::Get(transaction);
 	state.Initialize(column_ids, context, table_filters);
 	row_groups->InitializeScan(context, state.table_state, column_ids, table_filters);
-	local_storage.InitializeScan(*this, state.local_state, table_filters);
+	local_storage.InitializeScan(context, *this, state.local_state, table_filters);
 }
 
 void DataTable::InitializeScanWithOffset(DuckTransaction &transaction, TableScanState &state,
@@ -308,21 +309,20 @@ void DataTable::InitializeParallelScan(ClientContext &context, ParallelTableScan
 	local_storage.InitializeParallelScan(*this, state.local_state);
 }
 
-idx_t DataTable::NextParallelScan(ClientContext &context, ParallelTableScanState &state, TableScanState &scan_state) {
-	if (row_groups->NextParallelScan(context, state.scan_state, scan_state.table_state)) {
-		return scan_state.table_state.row_group->GetCount();
+optional_idx DataTable::NextParallelScan(ClientContext &context, ParallelTableScanState &state,
+                                         TableScanState &scan_state, bool initialize_columns) {
+	const auto rows =
+	    row_groups->NextParallelScan(context, state.scan_state, scan_state.table_state, initialize_columns);
+	if (rows.IsValid()) {
+		return rows;
 	}
 	if (state.scan_state.row_number_base.IsValid()) {
 		// start the row number for transaction-local rows from the final row count in the base table
 		scan_state.local_state.row_number_base = state.scan_state.row_number_base.GetIndex();
 	}
 	auto &local_storage = LocalStorage::Get(context, db);
-	if (local_storage.NextParallelScan(context, *this, state.local_state, scan_state.local_state)) {
-		return scan_state.local_state.row_group->GetCount();
-	} else {
-		// finished all scans: no more scans remaining
-		return 0;
-	}
+	return local_storage.NextParallelScan(context, *this, state.local_state, scan_state.local_state,
+	                                      initialize_columns);
 }
 
 void DataTable::Scan(DuckTransaction &transaction, DataChunk &result, TableScanState &state) {
@@ -515,12 +515,14 @@ void DataTable::Fetch(DuckTransaction &transaction, DataChunk &result, const vec
 	D_ASSERT(result.size() == committed_count);
 
 	// Fetch local rows into a separate chunk.
-	auto &allocator = Allocator::Get(local_storage.GetClientContext());
+	// The table's database outlives every reader, unlike the connection that created the local storage.
+	auto &allocator = Allocator::Get(db);
 	DataChunk local_chunk;
 	local_chunk.Initialize(allocator, result.GetTypes());
 	Vector local_row_ids(row_identifiers, local_sel, local_count);
 	local_row_ids.Flatten();
 	ColumnFetchState local_fetch_state;
+	local_fetch_state.context = state.context;
 	local_storage.FetchChunk(*this, local_row_ids, local_count, column_ids, local_chunk, local_fetch_state);
 
 	// Append local rows after committed rows in the result.

@@ -25,6 +25,7 @@ set(TEST_API_OBJECTS
     test_extension_setting_autoload.cpp
     test_instance_cache.cpp
     test_storage_extension_alias.cpp
+    test_transaction_snapshot.cpp
     test_results.cpp
     test_reset.cpp
     test_get_table_names.cpp
@@ -40,10 +41,13 @@ set(TEST_API_OBJECTS
     test_operator_memory_limit.cpp
     test_query_profiler.cpp
     test_read_ahead_abandon.cpp
+    test_read_ahead_progress.cpp
+    test_read_ahead_failure.cpp
     test_row_id_deduplicator.cpp
     test_dbdir.cpp
     test_pending_with_parameters.cpp
     test_parse_statement_iterator.cpp
+    test_dialect_extension.cpp
     test_grammar_extension.cpp
     test_progress_bar.cpp
     test_uuid.cpp
