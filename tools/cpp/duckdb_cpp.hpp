@@ -476,6 +476,44 @@ private:
 // syntactic: it touches no catalog and opens no transaction, so unknown tables and type errors surface at bind or
 // execution time instead.
 
+/// The kind of a SQL statement, as the parser classifies it.
+enum class StatementType : uint8_t {
+	INVALID = 0,
+	SELECT = 1,
+	INSERT = 2,
+	UPDATE = 3,
+	CREATE = 4,
+	DELETE = 5,
+	PREPARE = 6,
+	EXECUTE = 7,
+	ALTER = 8,
+	TRANSACTION = 9,
+	COPY = 10,
+	ANALYZE = 11,
+	VARIABLE_SET = 12,
+	CREATE_FUNC = 13,
+	EXPLAIN = 14,
+	DROP = 15,
+	EXPORT = 16,
+	PRAGMA = 17,
+	VACUUM = 18,
+	CALL = 19,
+	SET = 20,
+	LOAD = 21,
+	RELATION = 22,
+	EXTENSION = 23,
+	LOGICAL_PLAN = 24,
+	ATTACH = 25,
+	DETACH = 26,
+	MULTI = 27,
+	COPY_DATABASE = 28,
+	UPDATE_EXTENSIONS = 29,
+	MERGE_INTO = 30,
+	CONNECT = 31,
+	DISCONNECT = 32,
+	EXTERNAL_RESOURCE = 33,
+};
+
 /// An owned, parsed SQL statement, produced by `StatementIterator::Next` and executed by `Connection::Execute`.
 /// Executing borrows the statement, so the same one can be executed any number of times.
 class SqlStatement final : public detail::Handle<SqlStatement> {
@@ -486,6 +524,21 @@ public:
 	SqlStatement &operator=(SqlStatement &&) noexcept = default;
 
 	~SqlStatement() override;
+
+	/// The parser's classification of the statement, available without binding. It is the type before the rewrites
+	/// execution applies, so a PRAGMA reports PRAGMA; `QueryResult::GetStatementType` reports what it became.
+	auto GetStatementType() const -> StatementType;
+
+	/// The statement's own text: its slice of the parsed string, from its first token up to the first token of the
+	/// next statement or the end of the input, so a trailing `;` and the whitespace after it are included.
+	/// @return A view borrowed from this statement, valid until it is destroyed.
+	auto GetText() const -> std::string_view;
+
+	/// The names of the statement's parameters, in binding order: the order of `Connection::Bind`'s `parameters`
+	/// schema, so element i here names field i there. "1", "2", ... for positional parameters ($1 or ?), the
+	/// identifier for named ones ($name). Parse-time, so it needs no catalog; only the types wait for `Bind`.
+	/// @return Views borrowed from this statement, valid until it is destroyed.
+	auto GetParameterNames() const -> std::vector<std::string_view>;
 
 private:
 	explicit SqlStatement(void *impl);
@@ -509,6 +562,47 @@ public:
 
 private:
 	explicit StatementIterator(void *impl);
+};
+
+/// The lexical class of a token, as `Connection::Tokenize` reports it: what the tokenizer assigns before parsing, with
+/// no catalog or grammar-role refinement.
+enum class TokenType : uint8_t {
+	/// Never the class of a token; the value of a zero-initialized `Token`.
+	INVALID = 0,
+	/// A keyword of the connection's grammar.
+	KEYWORD = 1,
+	/// A bare or double-quoted identifier, quotes included.
+	IDENTIFIER = 2,
+	/// A quoted or dollar-quoted string, delimiters included.
+	STRING_LITERAL = 3,
+	/// A numeric literal.
+	NUMBER_LITERAL = 4,
+	/// An operator or punctuation run other than the statement terminator.
+	OPERATOR = 5,
+	/// A line or block comment, delimiters included.
+	COMMENT = 6,
+	/// A statement-terminating semicolon.
+	TERMINATOR = 7,
+};
+
+/// One token of a SQL string: its class and its byte range in the input, so `sql.substr(start, length)` is the lexeme.
+struct Token {
+	/// The token's lexical class.
+	TokenType type = TokenType::INVALID;
+	/// Byte offset of the token in the input.
+	idx_t start = 0;
+	/// Byte length of the token.
+	idx_t length = 0;
+};
+
+/// The tokens of a SQL string, as `Connection::Tokenize` reports them.
+struct TokenList {
+	/// The tokens in input order; empty for empty or whitespace-only input.
+	std::vector<Token> tokens;
+	/// Whether the input ended before the closing delimiter of its last token: inside an open string, quoted
+	/// identifier, block comment or dollar-quoted string, or in a line comment with no trailing newline. When true,
+	/// the last token is the open one.
+	bool ends_unterminated = false;
 };
 
 /// A statement bound and planned once, executable repeatedly. Produced by `Connection::Prepare`.
@@ -623,6 +717,15 @@ public:
 	auto ParseSQL(const std::string &sql) -> StatementIterator {
 		return ParseSQL(sql.c_str());
 	}
+
+	/// Splits a SQL string into its tokens without parsing it: no binding, no catalog access, no transaction. The
+	/// connection supplies the grammar whose keyword set decides KEYWORD versus IDENTIFIER. Offsets are byte offsets
+	/// into `sql` exactly as given, and whitespace is not a token. Malformed input does not throw: an unterminated
+	/// string, block comment or dollar-quoted string yields a token that runs to the end of the input, and
+	/// `TokenList::ends_unterminated` reports it.
+	/// @param sql The SQL text; may contain interior null bytes.
+	/// @return The tokens in input order, and whether the input ended inside an open token.
+	auto Tokenize(std::string_view sql) const -> TokenList;
 
 	/// Executes a statement, borrowing it rather than consuming it, so the same statement can be executed again.
 	/// @param statement The statement to execute.
@@ -2679,40 +2782,8 @@ public:
 		NOTHING = 2,
 	};
 
-	/// The kind of SQL statement a result came from.
-	enum class StatementType : uint8_t {
-		INVALID = 0,
-		SELECT = 1,
-		INSERT = 2,
-		UPDATE = 3,
-		CREATE = 4,
-		DELETE = 5,
-		PREPARE = 6,
-		EXECUTE = 7,
-		ALTER = 8,
-		TRANSACTION = 9,
-		COPY = 10,
-		ANALYZE = 11,
-		VARIABLE_SET = 12,
-		CREATE_FUNC = 13,
-		EXPLAIN = 14,
-		DROP = 15,
-		EXPORT = 16,
-		PRAGMA = 17,
-		VACUUM = 18,
-		CALL = 19,
-		SET = 20,
-		LOAD = 21,
-		RELATION = 22,
-		EXTENSION = 23,
-		LOGICAL_PLAN = 24,
-		ATTACH = 25,
-		DETACH = 26,
-		MULTI = 27,
-		COPY_DATABASE = 28,
-		UPDATE_EXTENSIONS = 29,
-		MERGE_INTO = 30,
-	};
+	/// The kind of SQL statement a result came from; see `cxx::StatementType`.
+	using StatementType = cxx::StatementType;
 
 	QueryResult(QueryResult &&) noexcept = default;
 	QueryResult &operator=(QueryResult &&) noexcept = default;
@@ -3683,6 +3754,20 @@ public:
 	class ExecInput;
 	class ProgressInput;
 	class FilterPushdownInput;
+	class PartitionDataInput;
+	class PartitioningInput;
+
+	/// Whether, and how, the scan is partitioned by a set of columns. Reported from the partitioning callback.
+	enum class PartitionInfo : uint8_t {
+		/// The scan is not known to be partitioned by the requested columns.
+		NOT_PARTITIONED = 0,
+		/// Every batch the scan produces carries exactly one distinct value for the requested columns.
+		SINGLE_VALUE_PARTITIONS = 1,
+		/// The batches the scan produces overlap only at their boundaries.
+		OVERLAPPING_PARTITIONS = 2,
+		/// The batches the scan produces are disjoint ranges.
+		DISJOINT_PARTITIONS = 3,
+	};
 
 	/// Called once per query while the function call is bound; declares the columns the function returns. Required.
 	using BindCallback = void (*)(BindInput &input);
@@ -3697,6 +3782,12 @@ public:
 	/// Called while the query is optimized, possibly more than once, with the predicates the query applies to the
 	/// function's rows; accepts the ones the function will apply itself. Optional.
 	using FilterPushdownCallback = void (*)(FilterPushdownInput &input);
+	/// Called after every batch the exec callback produces, on the thread that produced it, to report the batch's
+	/// ordering position and, when requested, the value it carries for each partitioning column. Optional.
+	using PartitionDataCallback = void (*)(PartitionDataInput &input);
+	/// Called while the query is planned, possibly more than once, with a candidate `GROUP BY` column set; reports
+	/// whether every batch carries a single value for it. Optional; requires a partition data callback.
+	using PartitioningCallback = void (*)(PartitioningInput &input);
 
 	TableFunction(TableFunction &&) noexcept = default;
 	TableFunction &operator=(TableFunction &&) noexcept = default;
@@ -3739,6 +3830,8 @@ public:
 	auto SetExecCallback(ExecCallback callback) & -> TableFunction &;
 	auto SetProgressCallback(ProgressCallback callback) & -> TableFunction &;
 	auto SetFilterPushdownCallback(FilterPushdownCallback callback) & -> TableFunction &;
+	auto SetPartitionDataCallback(PartitionDataCallback callback) & -> TableFunction &;
+	auto SetPartitioningCallback(PartitioningCallback callback) & -> TableFunction &;
 
 	/// Declares whether the function supports projection pushdown. Defaults to false. With it, the engine asks for
 	/// only the columns a query uses: the exec callback's output chunk holds one vector per requested column, and
@@ -3748,8 +3841,8 @@ public:
 
 	/// Registers the function in the catalog it was created against. The function object remains valid and may be
 	/// adjusted and registered again; user data set via `SetUserData` is consumed by the first `Register`.
-	/// @throws InvalidInputException When the name, bind callback or exec callback is missing, or the signature
-	/// declares a return type.
+	/// @throws InvalidInputException When the name, bind callback or exec callback is missing, the signature
+	/// declares a return type, or a partitioning callback is set without a partition data callback.
 	auto Register() -> void;
 
 private:
@@ -3763,6 +3856,8 @@ private:
 	ExecCallback exec_callback = nullptr;
 	ProgressCallback progress_callback = nullptr;
 	FilterPushdownCallback filter_pushdown_callback = nullptr;
+	PartitionDataCallback partition_data_callback = nullptr;
+	PartitioningCallback partitioning_callback = nullptr;
 	detail::UserData user_data;
 
 public:
@@ -4101,6 +4196,129 @@ public:
 
 	private:
 		FilterPushdownInput(void *args, void *context) : args(args), context(context) {
+		}
+
+		void *args;
+		void *context;
+
+		void *GetBindDataInternal() const;
+		void *GetUserDataInternal() const;
+	};
+
+	/// What the partition data callback works with. Borrowed, valid only for the callback duration.
+	///
+	/// The callback runs after every batch the exec callback produces, on the thread that produced it. A batch index
+	/// must be reported on every call with `SetBatchIndex`, whether or not `RequiresBatchIndex` is true. When
+	/// `RequiresPartitionColumns` is true, `SetPartitionValue` must be called once for every index below
+	/// `GetPartitionColumnCount`. The engine reads the partition values only when the batch index changes: within one
+	/// thread the index must not decrease, and the values may only change together with it.
+	class PartitionDataInput {
+		friend detail::Factory;
+
+	public:
+		/// The bind data set via `BindInput::SetBindData`.
+		/// @throws InvalidInputException When none was set.
+		template <class T>
+		auto GetBindData() const -> const T & {
+			return *static_cast<const T *>(GetBindDataInternal());
+		}
+
+		/// The global state set via `InitGlobalInput::SetGlobalState`. Shared with every other scanning thread;
+		/// access must be synchronized.
+		/// @throws InvalidInputException When none was set.
+		template <class T>
+		auto GetGlobalState() const -> T & {
+			return *static_cast<T *>(GetGlobalStateInternal());
+		}
+
+		/// The local state set via `InitLocalInput::SetLocalState`, private to this thread.
+		/// @throws InvalidInputException When none was set.
+		template <class T>
+		auto GetLocalState() const -> T & {
+			return *static_cast<T *>(GetLocalStateInternal());
+		}
+
+		/// The user data set via `TableFunction::SetUserData`.
+		/// @throws InvalidInputException When none was set.
+		template <class T>
+		auto GetUserData() const -> T & {
+			return *static_cast<T *>(GetUserDataInternal());
+		}
+
+		/// Whether a downstream operator uses the batch index to restore the scan's order.
+		auto RequiresBatchIndex() const -> bool;
+		/// Whether a downstream operator needs the batch's value for each partitioning column.
+		auto RequiresPartitionColumns() const -> bool;
+		/// How many partitioning columns are requested; zero unless `RequiresPartitionColumns` is true.
+		auto GetPartitionColumnCount() const -> idx_t;
+		/// Which declared column (in `BindInput::AddResultColumn` order) the partitioning column at `index` stands for.
+		/// @throws InvalidInputException When the index is out of bounds.
+		auto GetPartitionColumnIndex(idx_t index) const -> idx_t;
+
+		/// Reports the batch's ordering position. Required on every call. Must not decrease across calls on the same
+		/// thread, and must change whenever the reported partition values change.
+		/// @throws InvalidInputException When the value is out of range.
+		auto SetBatchIndex(idx_t batch_index) -> void;
+		/// Reports the single value every row of the batch carries for the partitioning column at `index`. The value
+		/// is copied and must be of the declared column's type.
+		/// @throws InvalidInputException When the index is out of bounds or the type does not match.
+		auto SetPartitionValue(idx_t index, const Value &value) -> void;
+
+		/// The execution context. Borrowed, valid only for the callback duration.
+		auto GetContext() const -> Context;
+
+	private:
+		PartitionDataInput(void *args, void *context) : args(args), context(context) {
+		}
+
+		void *args;
+		void *context;
+
+		void *GetBindDataInternal() const;
+		void *GetGlobalStateInternal() const;
+		void *GetLocalStateInternal() const;
+		void *GetUserDataInternal() const;
+	};
+
+	/// What the partitioning callback works with. Borrowed, valid only for the callback duration.
+	///
+	/// The callback runs on the planning thread, only while the optimizer considers a partitioned aggregate over the
+	/// scan, and may run more than once for one query. It must answer deterministically for a given column set. Only
+	/// `PartitionInfo::SINGLE_VALUE_PARTITIONS` unlocks the optimization; a callback that returns without calling
+	/// `SetPartitionInfo` reports `PartitionInfo::NOT_PARTITIONED`.
+	class PartitioningInput {
+		friend detail::Factory;
+
+	public:
+		/// The bind data set via `BindInput::SetBindData`.
+		/// @throws InvalidInputException When none was set.
+		template <class T>
+		auto GetBindData() const -> const T & {
+			return *static_cast<const T *>(GetBindDataInternal());
+		}
+
+		/// The user data set via `TableFunction::SetUserData`.
+		/// @throws InvalidInputException When none was set.
+		template <class T>
+		auto GetUserData() const -> T & {
+			return *static_cast<T *>(GetUserDataInternal());
+		}
+
+		/// How many columns the candidate `GROUP BY` set holds.
+		auto GetPartitionColumnCount() const -> idx_t;
+		/// Which declared column (in `BindInput::AddResultColumn` order) the candidate column at `index` stands for.
+		/// @throws InvalidInputException When the index is out of bounds.
+		auto GetPartitionColumnIndex(idx_t index) const -> idx_t;
+
+		/// Reports whether, and how, the scan is partitioned by the candidate column set.
+		/// @throws InvalidInputException When the value is not one of the enum's declared values.
+		auto SetPartitionInfo(PartitionInfo partition_info) -> void;
+
+		/// The query's context. Borrowed, valid only for the callback duration.
+		auto GetContext() const -> Context;
+
+	private:
+		PartitioningInput(void *args, void *context) : args(args), context(context) {
 		}
 
 		void *args;

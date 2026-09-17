@@ -314,6 +314,8 @@ enum class LimitNodeType : uint8_t;
 
 enum class LimitValueType : uint8_t;
 
+enum class LiteralKind : uint8_t;
+
 enum class LoadType : uint8_t;
 
 enum class LogContextScope : uint8_t;
@@ -347,6 +349,8 @@ enum class MergeActionType : uint8_t;
 enum class MetaPipelineType : uint8_t;
 
 enum class Monotonicity : uint8_t;
+
+enum class MultiFileClaimResult : uint8_t;
 
 enum class MultiFileColumnMappingMode : uint8_t;
 
@@ -404,8 +408,6 @@ enum class PartitionedTupleDataType : uint8_t;
 
 enum class PatternMatchType : uint8_t;
 
-enum class PendingExecutionResult : uint8_t;
-
 enum class PhysicalOperatorType : uint8_t;
 
 enum class PhysicalTableScanExecutionStrategy : uint8_t;
@@ -446,7 +448,7 @@ enum class QueryNodeType : uint8_t;
 
 enum class QueryResultMemoryType : uint8_t;
 
-enum class QueryResultOutputType : uint8_t;
+enum class QueryResultState : uint8_t;
 
 enum class QueryResultType : uint8_t;
 
@@ -469,6 +471,8 @@ enum class RemoveUnusedColumnsMode : uint8_t;
 enum class RenderMode : uint8_t;
 
 enum class RequestType : uint8_t;
+
+enum class ResultEagerness : uint8_t;
 
 enum class ResultLifetime : uint8_t;
 
@@ -512,6 +516,10 @@ enum class SetType : uint8_t;
 
 enum class SettingScope : uint8_t;
 
+enum class SharedTransactionGuardMode : uint8_t;
+
+enum class SharedTransactionGuardWait : uint8_t;
+
 enum class ShowBehaviorType : uint8_t;
 
 enum class ShowType : uint8_t;
@@ -553,8 +561,6 @@ enum class StorageIndexType : uint8_t;
 enum class StorageVersion : uint64_t;
 
 enum class StrTimeSpecifier : uint8_t;
-
-enum class StreamExecutionResult : uint8_t;
 
 enum class SubqueryType : uint8_t;
 
@@ -1067,6 +1073,9 @@ template<>
 const char* EnumUtil::ToChars<LimitValueType>(LimitValueType value);
 
 template<>
+const char* EnumUtil::ToChars<LiteralKind>(LiteralKind value);
+
+template<>
 const char* EnumUtil::ToChars<LoadType>(LoadType value);
 
 template<>
@@ -1116,6 +1125,9 @@ const char* EnumUtil::ToChars<MetaPipelineType>(MetaPipelineType value);
 
 template<>
 const char* EnumUtil::ToChars<Monotonicity>(Monotonicity value);
+
+template<>
+const char* EnumUtil::ToChars<MultiFileClaimResult>(MultiFileClaimResult value);
 
 template<>
 const char* EnumUtil::ToChars<MultiFileColumnMappingMode>(MultiFileColumnMappingMode value);
@@ -1202,9 +1214,6 @@ template<>
 const char* EnumUtil::ToChars<PatternMatchType>(PatternMatchType value);
 
 template<>
-const char* EnumUtil::ToChars<PendingExecutionResult>(PendingExecutionResult value);
-
-template<>
 const char* EnumUtil::ToChars<PhysicalOperatorType>(PhysicalOperatorType value);
 
 template<>
@@ -1265,7 +1274,7 @@ template<>
 const char* EnumUtil::ToChars<QueryResultMemoryType>(QueryResultMemoryType value);
 
 template<>
-const char* EnumUtil::ToChars<QueryResultOutputType>(QueryResultOutputType value);
+const char* EnumUtil::ToChars<QueryResultState>(QueryResultState value);
 
 template<>
 const char* EnumUtil::ToChars<QueryResultType>(QueryResultType value);
@@ -1299,6 +1308,9 @@ const char* EnumUtil::ToChars<RenderMode>(RenderMode value);
 
 template<>
 const char* EnumUtil::ToChars<RequestType>(RequestType value);
+
+template<>
+const char* EnumUtil::ToChars<ResultEagerness>(ResultEagerness value);
 
 template<>
 const char* EnumUtil::ToChars<ResultLifetime>(ResultLifetime value);
@@ -1364,6 +1376,12 @@ template<>
 const char* EnumUtil::ToChars<SettingScope>(SettingScope value);
 
 template<>
+const char* EnumUtil::ToChars<SharedTransactionGuardMode>(SharedTransactionGuardMode value);
+
+template<>
+const char* EnumUtil::ToChars<SharedTransactionGuardWait>(SharedTransactionGuardWait value);
+
+template<>
 const char* EnumUtil::ToChars<ShowBehaviorType>(ShowBehaviorType value);
 
 template<>
@@ -1425,9 +1443,6 @@ const char* EnumUtil::ToChars<StorageVersion>(StorageVersion value);
 
 template<>
 const char* EnumUtil::ToChars<StrTimeSpecifier>(StrTimeSpecifier value);
-
-template<>
-const char* EnumUtil::ToChars<StreamExecutionResult>(StreamExecutionResult value);
 
 template<>
 const char* EnumUtil::ToChars<SubqueryType>(SubqueryType value);
@@ -1983,6 +1998,9 @@ template<>
 LimitValueType EnumUtil::FromString<LimitValueType>(const char *value);
 
 template<>
+LiteralKind EnumUtil::FromString<LiteralKind>(const char *value);
+
+template<>
 LoadType EnumUtil::FromString<LoadType>(const char *value);
 
 template<>
@@ -2032,6 +2050,9 @@ MetaPipelineType EnumUtil::FromString<MetaPipelineType>(const char *value);
 
 template<>
 Monotonicity EnumUtil::FromString<Monotonicity>(const char *value);
+
+template<>
+MultiFileClaimResult EnumUtil::FromString<MultiFileClaimResult>(const char *value);
 
 template<>
 MultiFileColumnMappingMode EnumUtil::FromString<MultiFileColumnMappingMode>(const char *value);
@@ -2118,9 +2139,6 @@ template<>
 PatternMatchType EnumUtil::FromString<PatternMatchType>(const char *value);
 
 template<>
-PendingExecutionResult EnumUtil::FromString<PendingExecutionResult>(const char *value);
-
-template<>
 PhysicalOperatorType EnumUtil::FromString<PhysicalOperatorType>(const char *value);
 
 template<>
@@ -2181,7 +2199,7 @@ template<>
 QueryResultMemoryType EnumUtil::FromString<QueryResultMemoryType>(const char *value);
 
 template<>
-QueryResultOutputType EnumUtil::FromString<QueryResultOutputType>(const char *value);
+QueryResultState EnumUtil::FromString<QueryResultState>(const char *value);
 
 template<>
 QueryResultType EnumUtil::FromString<QueryResultType>(const char *value);
@@ -2215,6 +2233,9 @@ RenderMode EnumUtil::FromString<RenderMode>(const char *value);
 
 template<>
 RequestType EnumUtil::FromString<RequestType>(const char *value);
+
+template<>
+ResultEagerness EnumUtil::FromString<ResultEagerness>(const char *value);
 
 template<>
 ResultLifetime EnumUtil::FromString<ResultLifetime>(const char *value);
@@ -2280,6 +2301,12 @@ template<>
 SettingScope EnumUtil::FromString<SettingScope>(const char *value);
 
 template<>
+SharedTransactionGuardMode EnumUtil::FromString<SharedTransactionGuardMode>(const char *value);
+
+template<>
+SharedTransactionGuardWait EnumUtil::FromString<SharedTransactionGuardWait>(const char *value);
+
+template<>
 ShowBehaviorType EnumUtil::FromString<ShowBehaviorType>(const char *value);
 
 template<>
@@ -2341,9 +2368,6 @@ StorageVersion EnumUtil::FromString<StorageVersion>(const char *value);
 
 template<>
 StrTimeSpecifier EnumUtil::FromString<StrTimeSpecifier>(const char *value);
-
-template<>
-StreamExecutionResult EnumUtil::FromString<StreamExecutionResult>(const char *value);
 
 template<>
 SubqueryType EnumUtil::FromString<SubqueryType>(const char *value);

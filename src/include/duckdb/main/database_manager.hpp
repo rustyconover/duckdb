@@ -24,6 +24,7 @@ class CatalogEntryRetriever;
 class CatalogSet;
 class ClientContext;
 class DatabaseInstance;
+class ResourceDeleter;
 class TaskScheduler;
 struct AttachOptions;
 struct AlterInfo;
@@ -51,11 +52,24 @@ public:
 	//! Get an attached database by its name
 	optional_ptr<AttachedDatabase> GetDatabase(ClientContext &context, const Identifier &name);
 	shared_ptr<AttachedDatabase> GetDatabase(const Identifier &name);
+	//! Route an opaque shared-transaction capability to its owning database.
+	bool RegisterSharedTransaction(const string &token, AttachedDatabase &database);
+	shared_ptr<AttachedDatabase> GetSharedTransactionDatabase(const string &token);
+	void UnregisterSharedTransaction(const string &token, AttachedDatabase &database);
 	//! Attach a new database
 	shared_ptr<AttachedDatabase> AttachDatabase(ClientContext &context, AttachInfo &info, AttachOptions &options);
 
 	//! Detach an existing database
 	void DetachDatabase(ClientContext &context, const Identifier &name, OnEntryNotFound if_not_found);
+	//! Queue the teardown of an external resource from a context that cannot run SQL (e.g. transaction
+	//! rollback, under the transaction lock).
+	void AddPendingTeardown(unique_ptr<ResourceDeleter> deleter);
+	//! Run queued teardowns, best-effort. Called once no transaction locks are held.
+	void DrainPendingTeardowns();
+	//! Detach every attachment borrowing the named resource, once it has been destroyed. Best-effort:
+	//! DETACH may refuse (the default database) and DESTROY goes through regardless. Scans rather than
+	//! keeping a refcount -- the attachment list cannot drift, and this follows a network round-trip.
+	void DetachResourceBorrowers(ClientContext &context, const string &resource_name);
 	//! Alter operation dispatcher
 	void Alter(ClientContext &context, AlterInfo &info);
 	//! Rollback the attach of a database
@@ -124,6 +138,10 @@ private:
 	mutex databases_lock;
 	//! The set of attached databases
 	identifier_map_t<shared_ptr<AttachedDatabase>> databases;
+	//! Routes transaction snapshot tokens to their database across rename and detach. The exporter's transaction
+	//! owns the database; this map never keeps one alive.
+	mutex shared_transactions_lock;
+	unordered_map<string, weak_ptr<AttachedDatabase>> shared_transactions;
 	//! The next object id handed out by the NextOid method
 	atomic<idx_t> next_oid;
 	//! The current query number
@@ -132,6 +150,13 @@ private:
 	atomic<transaction_t> current_transaction_id;
 	//! Count of remote catalogs currently attached; used to skip the remote pushdown optimizer when zero
 	atomic<CheckedInteger<idx_t, InternalException>> remote_catalog_count;
+	//! Lock for pending_teardowns
+	mutex pending_teardowns_lock;
+	//! External-resource teardowns queued from contexts that cannot run SQL (see AddPendingTeardown);
+	//! drained best-effort once no transaction locks are held.
+	vector<unique_ptr<ResourceDeleter>> pending_teardowns;
+	//! The current default database
+	Identifier default_database;
 	//! Manager for ensuring we never open the same database file twice in the same program
 	shared_ptr<DatabaseFilePathManager> path_manager;
 

@@ -17,7 +17,7 @@ namespace duckdb {
 
 struct FinalizeFun {
 	static constexpr const char *Name = "finalize";
-	static constexpr const char *Parameters = "col0";
+	static constexpr const char *Parameters = "state";
 	static constexpr const char *Description = "";
 	static constexpr const char *Example = "";
 	static constexpr const char *Categories = "";
@@ -27,7 +27,7 @@ struct FinalizeFun {
 
 struct CombineFun {
 	static constexpr const char *Name = "combine";
-	static constexpr const char *Parameters = "col0,col1";
+	static constexpr const char *Parameters = "state1,state2";
 	static constexpr const char *Description = "";
 	static constexpr const char *Example = "";
 	static constexpr const char *Categories = "";
@@ -37,7 +37,7 @@ struct CombineFun {
 
 struct ToAggregateStateFun {
 	static constexpr const char *Name = "to_aggregate_state";
-	static constexpr const char *Parameters = "data,name,signature";
+	static constexpr const char *Parameters = "data,name,signature,constant_parameters,order_by";
 	static constexpr const char *Description = "Converts a value into the aggregate state of the aggregate function with the given name and signature. The type of the value must exactly match the state layout of the aggregate function. An optional fourth argument supplies constant parameter values (e.g. string_agg's separator) as a list with one entry per argument, using NULL for arguments that are not bound to a constant.";
 	static constexpr const char *Example = "to_aggregate_state({'count': 1, 'value': 42.0}, 'avg', ['DOUBLE'])";
 	static constexpr const char *Categories = "";
@@ -70,6 +70,16 @@ struct CurrentTransactionId {
 	static constexpr const char *Parameters = "";
 	static constexpr const char *Description = "Get the current global transaction_id";
 	static constexpr const char *Example = "current_transaction_id()";
+	static constexpr const char *Categories = "";
+
+	static ScalarFunction GetFunction();
+};
+
+struct ExportTransactionSnapshotFun {
+	static constexpr const char *Name = "duckdb_export_transaction_snapshot";
+	static constexpr const char *Parameters = "[database]";
+	static constexpr const char *Description = "Share the current transaction of a database so that other in-process connections can read its state with SET TRANSACTION SNAPSHOT.";
+	static constexpr const char *Example = "duckdb_export_transaction_snapshot('memory')";
 	static constexpr const char *Categories = "";
 
 	static ScalarFunction GetFunction();

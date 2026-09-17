@@ -21,8 +21,6 @@
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/main/parse_iterator.hpp"
-#include "duckdb/main/pending_query_result.hpp"
-#include "duckdb/main/stream_query_result.hpp"
 #include "duckdb/main/table_description.hpp"
 #include "duckdb/parser/qualified_name.hpp"
 #include "duckdb/parser/sql_statement.hpp"
@@ -106,6 +104,50 @@ inline auto Convert(duckdb_v2_interval_t value) -> interval_t {
 	out.days = value.days;
 	out.micros = value.micros;
 	return out;
+}
+
+// The V2 enum surfaces core's StatementType under the same numeric values; every spec member is pinned. Core has no
+// count sentinel, so a member appended in core is caught by the test over the values past the last spec member.
+#define DUCKDB_V2_ASSERT_STATEMENT_TYPE(member)                                                                        \
+	static_assert(static_cast<uint8_t>(StatementType::member##_STATEMENT) == DUCKDB_V2_STATEMENT_TYPE_##member,        \
+	              "StatementType::" #member "_STATEMENT must mirror DUCKDB_V2_STATEMENT_TYPE_" #member)
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(INVALID);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(SELECT);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(INSERT);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(UPDATE);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(CREATE);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(DELETE);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(PREPARE);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(EXECUTE);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(ALTER);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(TRANSACTION);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(COPY);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(ANALYZE);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(VARIABLE_SET);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(CREATE_FUNC);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(EXPLAIN);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(DROP);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(EXPORT);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(PRAGMA);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(VACUUM);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(CALL);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(SET);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(LOAD);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(RELATION);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(EXTENSION);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(LOGICAL_PLAN);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(ATTACH);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(DETACH);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(MULTI);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(COPY_DATABASE);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(UPDATE_EXTENSIONS);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(MERGE_INTO);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(CONNECT);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(DISCONNECT);
+DUCKDB_V2_ASSERT_STATEMENT_TYPE(EXTERNAL_RESOURCE);
+#undef DUCKDB_V2_ASSERT_STATEMENT_TYPE
+inline auto Convert(StatementType type) -> DUCKDB_V2_STATEMENT_TYPE {
+	return static_cast<DUCKDB_V2_STATEMENT_TYPE>(type);
 }
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -320,7 +362,7 @@ auto NullArgumentError(duckdb_v2_error_info_handle *err, const char *function, c
 // Classify the exception currently being handled into a V2 error code and detail strings. Must be called from inside
 // a catch block. Never throws: if rendering the detail itself fails, it degrades to a bare code with empty detail
 // (RESOURCE_OUT_OF_MEMORY on allocation failure). Defined in capi_v2.cpp.
-auto RenderCaughtError(DUCKDB_V2_ERROR &code, string &text, string &raw_message) noexcept -> void;
+auto RenderCaughtError(DUCKDB_V2_ERROR &code, string &text, optional<string> &raw_message) noexcept -> void;
 
 // The null test behind DUCKDB_CHECK_ARG: a pointer/handle is invalid when null; a string/identifier view is invalid
 // when its pointer is null while it carries a non-zero length.
@@ -358,7 +400,7 @@ struct CV2ErrorInfo {
 	// rendered form (caret block, or JSON under errors_as_json); empty for a
 	// directly-set message. Both written on the error path (WithErrorHandler).
 	string message;
-	string raw_message;
+	optional<string> raw_message;
 
 	bool HasError() const {
 		return code != DUCKDB_V2_ERROR_NONE;
@@ -393,7 +435,7 @@ template <class T>
 DUCKDB_V2_ERROR WithErrorHandler(duckdb_v2_error_info_handle *err, T callback) noexcept {
 	auto code = static_cast<DUCKDB_V2_ERROR>(DUCKDB_V2_ERROR_NONE);
 	auto text = string();
-	auto raw_message = string();
+	optional<string> raw_message;
 
 	try {
 		// Invoke the callback
