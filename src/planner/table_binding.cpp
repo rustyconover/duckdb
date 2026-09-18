@@ -359,6 +359,7 @@ unique_ptr<ParsedExpression> DummyBinding::ParamToArg(ColumnRefExpression &colre
 	}
 	auto arg = (*arguments)[column_index]->Copy();
 	arg->SetAlias(colref.GetAlias());
+	arg->SetAnnotation(colref.GetAnnotation());
 	return arg;
 }
 

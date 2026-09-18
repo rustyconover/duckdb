@@ -72,3 +72,9 @@ query TT
 SELECT column_name, extra FROM (DESCRIBE WITH q AS (FROM quack(1)) SELECT quack FROM q GROUP BY quack);
 ----
 quack	{"comment":"A single duck utterance","tags":{"ext:name":"loadable_extension_demo","ext:column_type":"sound"}}
+
+# An explicit COMMENT replaces a table function column's comment, and explicit TAGS are merged with its tags
+query TT
+SELECT column_name, extra FROM (DESCRIBE SELECT quack AS quack COMMENT 'overridden' TAGS {'ext:column_type': 'noise', 'extra': 'yes'} FROM quack(1));
+----
+quack	{"comment":"overridden","tags":{"ext:name":"loadable_extension_demo","ext:column_type":"noise","extra":"yes"}}

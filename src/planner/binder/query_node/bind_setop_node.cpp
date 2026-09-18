@@ -235,6 +235,34 @@ static void GatherSetOpBinders(vector<BoundStatement> &children, vector<shared_p
 	}
 }
 
+//! A set operation's columns carry the COMMENT and TAGS declared for them in the select list of the first child that
+//! has them, the same child that names them. Metadata the children inherit does not cross the set operation.
+static void LabelSetOperationColumns(Binder &binder, const BoundSetOperationNode &node,
+                                     const vector<vector<ColumnBinding>> &child_bindings) {
+	vector<identifier_map_t<idx_t>> child_columns;
+	for (auto &child : node.bound_children) {
+		identifier_map_t<idx_t> columns;
+		for (idx_t col_idx = 0; col_idx < child.names.size(); col_idx++) {
+			columns[child.names[col_idx]] = col_idx;
+		}
+		child_columns.push_back(std::move(columns));
+	}
+	for (idx_t i = 0; i < node.names.size(); i++) {
+		ColumnBinding target(node.setop_index, ProjectionIndex(i));
+		if (node.setop_type != SetOperationType::UNION_BY_NAME) {
+			binder.CopyColumnAnnotation(child_bindings[0][i], target);
+			continue;
+		}
+		for (idx_t child_idx = 0; child_idx < node.bound_children.size(); child_idx++) {
+			auto entry = child_columns[child_idx].find(node.names[i]);
+			if (entry != child_columns[child_idx].end()) {
+				binder.CopyColumnAnnotation(child_bindings[child_idx][entry->second], target);
+				break;
+			}
+		}
+	}
+}
+
 BoundStatement Binder::BindNode(SetOperationNode &statement) {
 	BoundSetOperationNode result;
 	result.setop_type = statement.setop_type;
@@ -250,11 +278,14 @@ BoundStatement Binder::BindNode(SetOperationNode &statement) {
 	    statement.setop_type != SetOperationType::UNION_BY_NAME) {
 		throw InternalException("Set Operation type must have exactly 2 children - except for UNION/UNION_BY_NAME");
 	}
+	// the output columns of each child, taken before UNION BY NAME reorders them
+	vector<vector<ColumnBinding>> child_bindings;
 	for (auto &child : statement.children) {
 		auto child_binder = Binder::CreateBinder(context, this);
 		child_binder->SetCanContainNulls(true);
 		auto child_node = child_binder->BindNode(*child);
 		MoveCorrelatedExpressions(*child_binder);
+		child_bindings.push_back(child_node.plan->GetColumnBindings());
 		result.bound_children.push_back(std::move(child_node));
 		result.child_binders.push_back(std::move(child_binder));
 	}
@@ -311,6 +342,8 @@ BoundStatement Binder::BindNode(SetOperationNode &statement) {
 
 	// finally bind the types of the ORDER/DISTINCT clause expressions
 	BindModifiers(result, result.setop_index, result.names, result.types, bind_state);
+
+	LabelSetOperationColumns(*this, result, child_bindings);
 
 	BoundStatement result_statement;
 	result_statement.types = result.types;

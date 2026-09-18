@@ -44,6 +44,11 @@ BoundStatement Binder::BindNode(RecursiveCTENode &statement) {
 	for (idx_t i = 0; i < statement.aliases.size() && i < result.names.size(); i++) {
 		result.names[i] = statement.aliases[i];
 	}
+	// the COMMENT and TAGS declared in the select list of the LHS label the columns, like the names
+	auto left_bindings = left.plan->GetColumnBindings();
+	for (idx_t i = 0; i < left_bindings.size(); i++) {
+		CopyColumnAnnotation(left_bindings[i], ColumnBinding(setop_index, ProjectionIndex(i)));
+	}
 
 	// This allows the right side to reference the CTE recursively
 	bind_context.AddGenericBinding(setop_index, statement.ctename, result.names, result.types);

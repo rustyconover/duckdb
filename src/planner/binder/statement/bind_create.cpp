@@ -21,6 +21,7 @@
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/expression/subquery_expression.hpp"
+#include "duckdb/parser/tableref/showref.hpp"
 #include "duckdb/parser/parsed_data/create_index_info.hpp"
 #include "duckdb/parser/parsed_data/create_macro_info.hpp"
 #include "duckdb/parser/parsed_data/create_trigger_info.hpp"
@@ -55,6 +56,15 @@
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 
 namespace duckdb {
+
+//! Whether an object created in the database can be persisted when it needs at least the given storage version
+static bool SupportsStorageVersion(AttachedDatabase &attached, bool temporary, StorageVersion required_version) {
+	if (temporary || attached.IsTemporary() || !attached.HasStorageManager()) {
+		return true;
+	}
+	auto &storage_manager = attached.GetStorageManager();
+	return storage_manager.InMemory() || storage_manager.GetStorageVersion() >= required_version;
+}
 
 static unique_ptr<CommonTableExpressionInfo> MakeTriggerValidationCTE(const TableCatalogEntry &table) {
 	auto alias_select = make_uniq<SelectNode>();
@@ -297,14 +307,9 @@ void Binder::BindCreateSchema(CreateSchemaInfo &info) {
 	if (info.IsNested()) {
 		// nested schemas can only be persisted with storage version v2.0.0 or higher
 		auto &resolved_catalog = Catalog::GetCatalog(context, info.SchemaCatalog());
-		auto &attached = resolved_catalog.GetAttached();
-		if (attached.HasStorageManager()) {
-			auto &storage_manager = attached.GetStorageManager();
-			if (!attached.IsTemporary() && !storage_manager.InMemory() &&
-			    storage_manager.GetStorageVersion() < StorageVersion::V2_0_0) {
-				throw BinderException("Nested schemas are only supported for storage versions v2.0.0 and higher.\n"
-				                      "Use an in-memory database, or ATTACH with (STORAGE_VERSION 'v2.0.0')");
-			}
+		if (!SupportsStorageVersion(resolved_catalog.GetAttached(), false, StorageVersion::V2_0_0)) {
+			throw BinderException("Nested schemas are only supported for storage versions v2.0.0 and higher.\n"
+			                      "Use an in-memory database, or ATTACH with (STORAGE_VERSION 'v2.0.0')");
 		}
 	}
 }
@@ -363,6 +368,37 @@ void Binder::BindView(ClientContext &context, const SelectStatement &stmt, const
 	}
 	result_types = query_node.types;
 	result_names = query_node.names;
+}
+
+static bool ContainsColumnAnnotations(QueryNode &node);
+
+static bool ContainsColumnAnnotations(ParsedExpression &expr) {
+	if (expr.GetAnnotation()) {
+		return true;
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::SUBQUERY &&
+	    ContainsColumnAnnotations(*expr.Cast<SubqueryExpression>().Subquery()->node)) {
+		return true;
+	}
+	bool result = false;
+	ParsedExpressionIterator::EnumerateChildren(
+	    expr, [&](ParsedExpression &child) { result = result || ContainsColumnAnnotations(child); });
+	return result;
+}
+
+//! Whether a query declares COMMENT or TAGS in a select list, including in its CTEs and subqueries
+static bool ContainsColumnAnnotations(QueryNode &node) {
+	bool result = false;
+	ParsedExpressionIterator::EnumerateQueryNodeChildren(
+	    node, [&](unique_ptr<ParsedExpression> &child) { result = result || ContainsColumnAnnotations(*child); },
+	    [&](TableRef &ref) {
+		    // the iterator does not enter the query of a DESCRIBE
+		    if (ref.type == TableReferenceType::SHOW_REF) {
+			    auto &show_ref = ref.Cast<ShowRef>();
+			    result = result || (show_ref.query && ContainsColumnAnnotations(*show_ref.query));
+		    }
+	    });
+	return result;
 }
 
 void Binder::BindCreateViewInfo(CreateViewInfo &base) {
@@ -434,18 +470,26 @@ SchemaCatalogEntry &Binder::BindCreateFunctionInfo(CreateInfo &info) {
 
 	// Figure out if we can store typed macro parameters
 	auto &attached = catalog.GetAttached();
-	auto store_types = true;
-	if (attached.HasStorageManager()) {
-		// If DuckDB is used as a storage, we must check the version.
-		auto &storage_manager = attached.GetStorageManager();
-		const auto since = StorageCompatibility::FromString("v1.4.0").storage_version;
-		store_types = info.temporary || attached.IsTemporary() || storage_manager.InMemory() ||
-		              storage_manager.GetStorageVersion() >= since;
-	}
+	auto store_types =
+	    SupportsStorageVersion(attached, info.temporary, StorageCompatibility::FromString("v1.4.0").storage_version);
 	// try to bind each of the included functions
 	vector_of_logical_type_set_t type_overloads;
 	auto &base = info.Cast<CreateMacroInfo>();
+	auto can_persist_annotations = SupportsStorageVersion(attached, info.temporary, StorageVersion::V2_0_0);
 	for (auto &function : base.macros) {
+		if (!can_persist_annotations) {
+			bool has_annotations = false;
+			if (info.type == CatalogType::MACRO_ENTRY) {
+				has_annotations = ContainsColumnAnnotations(*function->Cast<ScalarMacroFunction>().expression);
+			} else {
+				has_annotations = ContainsColumnAnnotations(*function->Cast<TableMacroFunction>().query_node);
+			}
+			if (has_annotations) {
+				throw BinderException("COMMENT and TAGS in a macro definition are only supported for storage versions "
+				                      "v2.0.0 and higher.\nUse an in-memory database, ATTACH with (STORAGE_VERSION "
+				                      "v2.0.0), or create a TEMP macro");
+			}
+		}
 		if (!store_types) {
 			for (const auto &type : function->types) {
 				if (type.id() != LogicalTypeId::UNKNOWN) {
@@ -689,16 +733,10 @@ SchemaCatalogEntry &Binder::BindCreateTriggerInfo(CreateTriggerInfo &create_trig
 
 	// Block trigger creation on databases with an older storage version
 	auto &catalog = Catalog::GetCatalog(context, create_trigger_info.GetQualifiedName().Catalog());
-	auto &attached = catalog.GetAttached();
-	if (attached.HasStorageManager()) {
-		auto &storage_manager = attached.GetStorageManager();
-		const auto since = StorageVersion::V2_0_0;
-		if (!create_trigger_info.temporary && !attached.IsTemporary() && !storage_manager.InMemory() &&
-		    storage_manager.GetStorageVersion() < since) {
-			string msg = "CREATE TRIGGER is only supported for storage versions v2.0.0 and higher.\n";
-			msg += "Use an in-memory database, ATTACH with (STORAGE_VERSION v2.0.0)";
-			throw BinderException(msg);
-		}
+	if (!SupportsStorageVersion(catalog.GetAttached(), create_trigger_info.temporary, StorageVersion::V2_0_0)) {
+		string msg = "CREATE TRIGGER is only supported for storage versions v2.0.0 and higher.\n";
+		msg += "Use an in-memory database, ATTACH with (STORAGE_VERSION v2.0.0)";
+		throw BinderException(msg);
 	}
 
 	if (create_trigger_info.timing == TriggerTiming::INSTEAD_OF) {
@@ -866,23 +904,28 @@ BoundStatement Binder::Bind(CreateStatement &stmt) {
 		if (base.security_type == ViewSecurityType::SECURE_VIEW) {
 			// secure views cannot be persisted in older storage formats - block their creation instead of silently
 			// turning them into regular views on the next checkpoint
-			auto &attached = schema.ParentCatalog().GetAttached();
-			if (!base.temporary && !attached.IsTemporary() && attached.HasStorageManager()) {
-				auto &storage_manager = attached.GetStorageManager();
-				if (!storage_manager.InMemory() && storage_manager.GetStorageVersion() < StorageVersion::V2_0_0) {
-					throw BinderException("CREATE SECURE VIEW is only supported for storage versions v2.0.0 and "
-					                      "higher.\nUse an in-memory database, or ATTACH with (STORAGE_VERSION "
-					                      "v2.0.0)");
-				}
+			if (!SupportsStorageVersion(schema.ParentCatalog().GetAttached(), base.temporary, StorageVersion::V2_0_0)) {
+				throw BinderException("CREATE SECURE VIEW is only supported for storage versions v2.0.0 and "
+				                      "higher.\nUse an in-memory database, or ATTACH with (STORAGE_VERSION "
+				                      "v2.0.0)");
 			}
 		}
+		bool view_exists = false;
 		if (stmt.info->on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
 			CatalogTransaction transaction(schema.ParentCatalog(), context);
 			auto existing_entry = schema.GetEntry(transaction, CatalogType::VIEW_ENTRY, base.GetViewName());
 			if (existing_entry && existing_entry->type == CatalogType::VIEW_ENTRY) {
 				// IF EXISTS and the view already exists - avoid binding
 				base.binding_mode = CreateViewBindingMode::SKIP_BINDING;
+				view_exists = true;
 			}
+		}
+		if (!view_exists && base.query &&
+		    !SupportsStorageVersion(schema.ParentCatalog().GetAttached(), base.temporary, StorageVersion::V2_0_0) &&
+		    ContainsColumnAnnotations(*base.query->node)) {
+			throw BinderException("COMMENT and TAGS in a view definition are only supported for storage versions "
+			                      "v2.0.0 and higher.\nUse an in-memory database, ATTACH with (STORAGE_VERSION "
+			                      "v2.0.0), or create a TEMP view");
 		}
 		BindCreateViewInfo(base);
 		result.plan = make_uniq<LogicalCreate>(LogicalOperatorType::LOGICAL_CREATE_VIEW, std::move(stmt.info), &schema);

@@ -1,0 +1,324 @@
+# name: test/sql/show_select/describe_select_annotations.test
+# description: DESCRIBE reports the COMMENT and TAGS declared in a SELECT list, and inherits them through columns that pass through unchanged
+# group: [show_select]
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT 42 AS ultimate_answer TAGS {'foo': 'bar'});
+----
+ultimate_answer	{"tags":{"foo":"bar"}}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT 42 AS a COMMENT 'answer', b: 7 TAGS {'k': 'v'} COMMENT 'seven', 8 AS c);
+----
+a	{"comment":"answer"}
+b	{"comment":"seven","tags":{"k":"v"}}
+c	NULL
+
+statement ok
+CREATE TABLE src(id INTEGER PRIMARY KEY, amount INTEGER DEFAULT 0, region VARCHAR, email VARCHAR, s STRUCT(f INTEGER));
+
+statement ok
+COMMENT ON COLUMN src.amount IS 'sale amount';
+
+statement ok
+CREATE TEMP VIEW sales AS
+SELECT id, amount AS amount TAGS {'unit': 'usd'}, region AS region TAGS {'dim': 'geo'}, email AS email TAGS {'pii': 'yes'}, s
+FROM src;
+
+# a view merges its tags with the comment of the table column
+query IIII
+SELECT column_name, "key", "default", extra FROM (DESCRIBE sales);
+----
+id	PRI	NULL	NULL
+amount	NULL	0	{"comment":"sale amount","tags":{"unit":"usd"}}
+region	NULL	NULL	{"tags":{"dim":"geo"}}
+email	NULL	NULL	{"tags":{"pii":"yes"}}
+s	NULL	NULL	NULL
+
+# columns that pass through unchanged inherit their metadata
+query II
+SELECT column_name, extra FROM (DESCRIBE
+SELECT amount, amount AS amt, t.amount AS t_amount, (amount) AS paren
+FROM sales t WHERE region = 'EU' ORDER BY amount LIMIT 10);
+----
+amount	{"comment":"sale amount","tags":{"unit":"usd"}}
+amt	{"comment":"sale amount","tags":{"unit":"usd"}}
+t_amount	{"comment":"sale amount","tags":{"unit":"usd"}}
+paren	{"comment":"sale amount","tags":{"unit":"usd"}}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT DISTINCT region FROM sales);
+----
+region	{"tags":{"dim":"geo"}}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT a.region, b.email FROM sales a LEFT JOIN sales b ON a.id = b.id);
+----
+region	{"tags":{"dim":"geo"}}
+email	{"tags":{"pii":"yes"}}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT email, row_number() OVER (ORDER BY id) AS rn FROM sales QUALIFY rn < 3);
+----
+email	{"tags":{"pii":"yes"}}
+rn	NULL
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT * EXCLUDE (id, amount, s) RENAME (email AS contact) FROM sales);
+----
+region	{"tags":{"dim":"geo"}}
+contact	{"tags":{"pii":"yes"}}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT l.email FROM src o, LATERAL (SELECT email FROM sales WHERE id = o.id) l);
+----
+email	{"tags":{"pii":"yes"}}
+
+statement ok
+CREATE TEMP MACRO sales_in(r) AS TABLE SELECT region, amount AS amount COMMENT 'amount in region' FROM sales WHERE region = r;
+
+query II
+SELECT column_name, extra FROM (DESCRIBE FROM sales_in('EU'));
+----
+region	{"tags":{"dim":"geo"}}
+amount	{"comment":"amount in region","tags":{"unit":"usd"}}
+
+# a column that only ORDER BY reads goes through a pruning projection
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT region AS r COMMENT 'ordered region' FROM sales ORDER BY amount);
+----
+r	{"comment":"ordered region","tags":{"dim":"geo"}}
+
+# an UNNEST that expands a struct shifts the columns after it
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT unnest(s), amount AS a COMMENT 'after unnest' FROM sales);
+----
+f	NULL
+a	{"comment":"after unnest","tags":{"unit":"usd"}}
+
+# computed columns inherit nothing
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT
+	amount + 1 AS plus_one,
+	amount::VARCHAR AS cast_amount,
+	upper(region) AS upper_region,
+	s.f AS field,
+	CASE WHEN amount > 0 THEN amount END AS case_amount,
+	coalesce(amount, 0) AS coalesce_amount,
+	unnest([amount]) AS unnested,
+	'constant' AS constant
+FROM sales);
+----
+plus_one	NULL
+cast_amount	NULL
+upper_region	NULL
+field	NULL
+case_amount	NULL
+coalesce_amount	NULL
+unnested	NULL
+constant	NULL
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT sum(amount) AS total, max(region) AS max_region FROM sales);
+----
+total	NULL
+max_region	NULL
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT * EXCLUDE (id, email, s) REPLACE (amount + 1 AS amount) FROM sales);
+----
+amount	NULL
+region	{"tags":{"dim":"geo"}}
+
+# a FULL OUTER JOIN USING column combines both sides
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT region FROM sales a FULL OUTER JOIN sales b USING (region));
+----
+region	NULL
+
+# a scalar subquery that may find no row inherits nothing
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT (SELECT region FROM sales LIMIT 1) AS first_region);
+----
+first_region	NULL
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT (SELECT b.region FROM sales b WHERE b.id = a.id) AS same_region FROM sales a);
+----
+same_region	NULL
+
+# a scalar subquery that always returns exactly one row passes its value through unchanged
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT (SELECT 42 AS x COMMENT 'inner') AS y);
+----
+y	{"comment":"inner"}
+
+# an explicit annotation describes a computed column
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT amount * 2 AS doubled COMMENT 'twice the amount' TAGS {'unit': 'usd'} FROM sales);
+----
+doubled	{"comment":"twice the amount","tags":{"unit":"usd"}}
+
+# an explicit COMMENT replaces the inherited one, and explicit TAGS are merged with the inherited ones
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT amount AS amount COMMENT 'net amount' FROM sales);
+----
+amount	{"comment":"net amount","tags":{"unit":"usd"}}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT amount AS amount TAGS {'scale': '2', 'unit': 'eur'} FROM sales);
+----
+amount	{"comment":"sale amount","tags":{"unit":"eur","scale":"2"}}
+
+# CTEs
+query II
+SELECT column_name, extra FROM (DESCRIBE
+WITH answers AS (SELECT 42 AS x COMMENT 'Deep Thought' TAGS {'src': 'hhgttg'})
+SELECT x AS answer TAGS {'unit': 'none'} FROM answers);
+----
+answer	{"comment":"Deep Thought","tags":{"src":"hhgttg","unit":"none"}}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE
+WITH a AS (SELECT amount AS amount COMMENT 'level a' FROM sales),
+     b(renamed) AS (SELECT amount FROM a),
+     c AS MATERIALIZED (SELECT renamed AS renamed TAGS {'level': 'c'} FROM b)
+SELECT renamed, renamed + 1 AS computed FROM c);
+----
+renamed	{"comment":"level a","tags":{"unit":"usd","level":"c"}}
+computed	NULL
+
+query II
+SELECT column_name, extra FROM (DESCRIBE WITH c AS (SELECT 1 AS x COMMENT 'x') SELECT l.x AS l_x, r.x AS r_x FROM c l, c r);
+----
+l_x	{"comment":"x"}
+r_x	{"comment":"x"}
+
+# a CTE of a query that encloses the DESCRIBE
+query II
+WITH c AS (SELECT region AS region COMMENT 'outer' FROM sales) SELECT column_name, extra FROM (DESCRIBE SELECT region FROM c);
+----
+region	{"comment":"outer","tags":{"dim":"geo"}}
+
+# the first child of a set operation labels its columns with its own COMMENT and TAGS
+query II
+SELECT column_name, extra FROM (DESCRIBE
+SELECT amount AS a COMMENT 'first' FROM sales UNION ALL SELECT amount AS a COMMENT 'second' FROM sales);
+----
+a	{"comment":"first"}
+
+# metadata inherited by a child does not cross a set operation
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT amount FROM sales UNION ALL SELECT amount AS amount COMMENT 'second' FROM sales);
+----
+amount	NULL
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT 1 AS a TAGS {'k': 'v'} UNION SELECT 2);
+----
+a	{"tags":{"k":"v"}}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT 1 AS a COMMENT 'x' INTERSECT SELECT 1);
+----
+a	{"comment":"x"}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT 1 AS a COMMENT 'x' EXCEPT SELECT 2);
+----
+a	{"comment":"x"}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE (SELECT 1 AS a COMMENT 'nested' UNION ALL SELECT 2) UNION ALL SELECT 3);
+----
+a	{"comment":"nested"}
+
+# the first child is cast to the result type of the set operation
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT 1 AS a COMMENT 'cast' UNION ALL SELECT 1.5);
+----
+a	{"comment":"cast"}
+
+# UNION BY NAME takes each column's metadata from the first child that has the column
+query II
+SELECT column_name, extra FROM (DESCRIBE
+SELECT 1 AS a, 2 AS b COMMENT 'b first'
+UNION ALL BY NAME
+SELECT 3 AS c COMMENT 'c second', 4 AS b COMMENT 'b second', 5 AS a COMMENT 'a second');
+----
+a	NULL
+b	{"comment":"b first"}
+c	{"comment":"c second"}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE
+(SELECT 1 AS a COMMENT 'a1' UNION ALL BY NAME SELECT 2 AS b COMMENT 'b1')
+UNION ALL BY NAME
+SELECT 3 AS b COMMENT 'b2', 4 AS c COMMENT 'c2');
+----
+a	{"comment":"a1"}
+b	{"comment":"b1"}
+c	{"comment":"c2"}
+
+# a recursive CTE is labelled by its anchor
+query II
+SELECT column_name, extra FROM (DESCRIBE
+WITH RECURSIVE r AS (SELECT 1 AS n COMMENT 'counter' UNION ALL SELECT n + 1 FROM r WHERE n < 3) SELECT n FROM r);
+----
+n	{"comment":"counter"}
+
+# group keys inherit, aggregates do not
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT region, sum(amount) AS total FROM sales GROUP BY region);
+----
+region	{"tags":{"dim":"geo"}}
+total	NULL
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT region AS r COMMENT 'grouped region', count(*) AS n COMMENT 'rows' FROM sales GROUP BY ALL);
+----
+r	{"comment":"grouped region","tags":{"dim":"geo"}}
+n	{"comment":"rows"}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT region, email FROM sales GROUP BY ROLLUP (region, email));
+----
+region	{"tags":{"dim":"geo"}}
+email	{"tags":{"pii":"yes"}}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT upper(region) AS r FROM sales GROUP BY 1);
+----
+r	NULL
+
+statement ok
+SET default_collation='nocase';
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT region FROM sales GROUP BY region);
+----
+region	{"tags":{"dim":"geo"}}
+
+statement ok
+RESET default_collation;
+
+# an annotation on a table column keeps the column's key and default
+query IIII
+SELECT column_name, "key", "default", extra FROM (DESCRIBE SELECT id AS ident COMMENT 'identifier', amount AS amount TAGS {'k': 'v'} FROM src);
+----
+ident	PRI	NULL	{"comment":"identifier"}
+amount	NULL	0	{"comment":"sale amount","tags":{"k":"v"}}
+
+# a secure view hides the metadata declared inside it
+statement ok
+CREATE TEMP SECURE VIEW secure_sales AS SELECT region AS region COMMENT 'hidden' FROM sales;
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT region FROM secure_sales);
+----
+region	NULL
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT region AS region COMMENT 'visible' FROM secure_sales);
+----
+region	{"comment":"visible"}

@@ -1,0 +1,133 @@
+# name: test/sql/show_select/describe_select_annotations_storage.test
+# description: COMMENT and TAGS in views and macros persist, and require storage version v2.0.0
+# group: [show_select]
+
+load {TEST_DIR}/select_annotations.db
+
+statement ok
+CREATE TABLE t(i INTEGER PRIMARY KEY);
+
+statement ok
+CREATE VIEW v AS WITH c AS (SELECT i AS id COMMENT 'the id' TAGS {'pii': 'no'} FROM t) SELECT id FROM c;
+
+statement ok
+CREATE MACRO m(p) AS TABLE SELECT p AS a COMMENT 'macro column';
+
+statement ok
+CREATE MACRO s() AS (SELECT 1 AS q COMMENT 'scalar macro');
+
+restart
+
+query III
+SELECT column_name, "key", extra FROM (DESCRIBE v);
+----
+id	PRI	{"comment":"the id","tags":{"pii":"no"}}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE FROM m(1));
+----
+a	{"comment":"macro column"}
+
+query I
+SELECT s();
+----
+1
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT s() AS x);
+----
+x	{"comment":"scalar macro"}
+
+query I
+SELECT sql FROM duckdb_views() WHERE view_name = 'v';
+----
+CREATE VIEW v AS WITH c AS (SELECT i AS id COMMENT 'the id' TAGS {'pii': 'no'} FROM t) SELECT id FROM c;
+
+statement ok
+CHECKPOINT;
+
+restart
+
+query III
+SELECT column_name, "key", extra FROM (DESCRIBE v);
+----
+id	PRI	{"comment":"the id","tags":{"pii":"no"}}
+
+# the view definition keeps the annotations when exported and imported
+statement ok
+EXPORT DATABASE '{TEST_DIR}/select_annotations_export';
+
+load {TEST_DIR}/select_annotations_imported.db
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/select_annotations_export';
+
+query III
+SELECT column_name, "key", extra FROM (DESCRIBE v);
+----
+id	PRI	{"comment":"the id","tags":{"pii":"no"}}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE FROM m(1));
+----
+a	{"comment":"macro column"}
+
+# older storage versions cannot store the annotations
+statement ok
+ATTACH '{TEST_DIR}/select_annotations_v1.db' AS old (STORAGE_VERSION 'v1.0.0');
+
+statement ok
+CREATE TABLE old.t(i INTEGER);
+
+statement ok
+CREATE VIEW old.plain AS SELECT i AS x FROM old.t;
+
+statement error
+CREATE VIEW old.annotated AS SELECT i AS x COMMENT 'x' FROM old.t;
+----
+COMMENT and TAGS in a view definition are only supported for storage versions v2.0.0 and higher
+
+statement error
+CREATE VIEW old.nested AS SELECT * FROM (SELECT (SELECT 1 AS y TAGS {'k': 'v'}) AS z);
+----
+COMMENT and TAGS in a view definition are only supported for storage versions v2.0.0 and higher
+
+statement error
+CREATE VIEW old.in_cte AS WITH c AS (SELECT 1 AS y COMMENT 'x') SELECT y FROM c UNION ALL SELECT 2;
+----
+COMMENT and TAGS in a view definition are only supported for storage versions v2.0.0 and higher
+
+statement error
+CREATE VIEW old.described AS SELECT column_name, extra FROM (DESCRIBE SELECT 1 AS a COMMENT 'x');
+----
+COMMENT and TAGS in a view definition are only supported for storage versions v2.0.0 and higher
+
+statement error
+CREATE VIEW old.deferred WITH (defer_binding = true) AS SELECT 1 AS a COMMENT 'x';
+----
+COMMENT and TAGS in a view definition are only supported for storage versions v2.0.0 and higher
+
+# a view that already exists is not created again
+statement ok
+CREATE VIEW IF NOT EXISTS old.plain AS SELECT 1 AS x COMMENT 'x';
+
+statement error
+CREATE MACRO old.tm() AS TABLE SELECT 1 AS q COMMENT 'x';
+----
+COMMENT and TAGS in a macro definition are only supported for storage versions v2.0.0 and higher
+
+statement error
+CREATE MACRO old.sm() AS (SELECT 1 AS q COMMENT 'x');
+----
+COMMENT and TAGS in a macro definition are only supported for storage versions v2.0.0 and higher
+
+statement ok
+USE old;
+
+statement ok
+CREATE TEMP VIEW temp_annotated AS SELECT 1 AS x COMMENT 'temporary';
+
+query II
+SELECT column_name, extra FROM (DESCRIBE temp_annotated);
+----
+x	{"comment":"temporary"}

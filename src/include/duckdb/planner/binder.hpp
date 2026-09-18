@@ -25,6 +25,7 @@
 #include "duckdb/planner/bind_context.hpp"
 #include "duckdb/planner/bound_statement.hpp"
 #include "duckdb/planner/bound_tokens.hpp"
+#include "duckdb/planner/column_binding_map.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/parser/expression/star_expression.hpp"
 #include "duckdb/planner/joinside.hpp"
@@ -81,6 +82,7 @@ struct UnpivotEntry;
 struct CopyInfo;
 struct CopyOption;
 struct BoundSetOpChild;
+struct ColumnAnnotation;
 struct BoundCTEData;
 enum class CopyToType : uint8_t;
 template <class T, class INDEX_TYPE>
@@ -206,6 +208,8 @@ struct GlobalBinderState {
 	optional_ptr<TableCatalogEntry> trigger_creation_table;
 	//! Name of the trigger being created (for error messages)
 	Identifier trigger_creation_name;
+	//! The COMMENT and TAGS declared for output columns, by the binding of the column that declares them
+	column_binding_map_t<shared_ptr<const ColumnAnnotation>> column_annotations;
 };
 
 //! Bind the parsed query tree to the actual columns present in the catalog.
@@ -310,6 +314,12 @@ public:
 
 	//! Generates an unused index for a table
 	TableIndex GenerateTableIndex();
+	//! Records the COMMENT and TAGS declared in a select list for an output column
+	void RegisterColumnAnnotation(ColumnBinding binding, shared_ptr<const ColumnAnnotation> annotation);
+	//! Labels an output column with the COMMENT and TAGS declared for another output column, if any
+	void CopyColumnAnnotation(ColumnBinding source, ColumnBinding target);
+	//! Returns the COMMENT and TAGS declared for an output column, if any
+	optional_ptr<const ColumnAnnotation> GetColumnAnnotation(ColumnBinding binding) const;
 
 	optional_ptr<CatalogEntry> GetCatalogEntry(const Identifier &catalog, const Identifier &schema,
 	                                           const EntryLookupInfo &lookup_info, OnEntryNotFound on_entry_not_found);

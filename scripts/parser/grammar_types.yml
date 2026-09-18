@@ -491,6 +491,9 @@ Expression:
     - ExpressionAsCollabel
     - ColIdExpression
     - ExpressionOptIdentifier
+    - SelectTargetEntry
+    - AnnotatedTarget
+    - ExplicitAlias
     - HavingClause
     - QualifyClause
     - WindowDefinition
@@ -623,6 +626,7 @@ ExpressionList:
     - BoundedListExpression
     - SliceBound
     - TargetList
+    - SelectTargetList
     - PragmaParameters
     - ReturningClause
     - WindowPartition
@@ -816,6 +820,14 @@ GroupByNode:
     - GroupByExpressions
     - GroupByAll
     - GroupByList
+
+ColumnAnnotationClause:
+  type: "ColumnAnnotationClause"
+  by_value: true
+  rules:
+    - ColumnAnnotation
+    - ColumnCommentAnnotation
+    - ColumnTagsAnnotation
 
 LimitPercentResult:
   type: "LimitPercentResult"
@@ -1673,6 +1685,12 @@ overrides:
     default_initializer: "INNER"
   SampleProperties: "pair<SampleMethod, optional_idx>"
   SampleFunction: "SampleMethod"
+  ColumnTagEntry:
+    type: "pair<string, string>"
+    by_value: true
+  ColumnTagList:
+    type: "vector<pair<string, string>>"
+    by_value: true
   # select.gram (ordering)
   DescOrAsc:
     type: "OrderType"
