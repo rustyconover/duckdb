@@ -6,7 +6,11 @@
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/operator/logical_column_data_get.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/planner/expression/bound_aggregate_expression.hpp"
+#include "duckdb/planner/operator/logical_aggregate.hpp"
+#include "duckdb/planner/operator/logical_cteref.hpp"
 #include "duckdb/planner/operator/logical_join.hpp"
+#include "duckdb/planner/operator/logical_materialized_cte.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog.hpp"
@@ -23,7 +27,11 @@
 namespace duckdb {
 
 struct DescribedColumnInfo {
+	//! Whether the operator that produces the column was found
+	bool found = false;
+	//! The table column that the column passes through unchanged, which describes NULL, key and default
 	optional_ptr<TableCatalogEntry> table = nullptr;
+	//! The column definition that the column passes through unchanged, which describes its comment and tags
 	optional_ptr<const ColumnDefinition> column = nullptr;
 };
 
@@ -41,26 +49,47 @@ static bool ForwardsChildColumns(LogicalOperator &op, idx_t child_idx) {
 	}
 }
 
-static DescribedColumnInfo FindDescribedColumn(LogicalOperator &op, ColumnBinding binding) {
+struct DescribeTraceState {
+	explicit DescribeTraceState(Binder &binder) : binder(binder) {
+	}
+
+	//! The binder of the DESCRIBE, which holds the CTEs of the queries that enclose it
+	Binder &binder;
+	//! The materialized CTEs of the plan, by table index
+	unordered_map<TableIndex, reference<LogicalMaterializedCTE>> ctes;
+};
+
+static void CollectMaterializedCTEs(LogicalOperator &op, DescribeTraceState &state) {
+	if (op.type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+		auto &cte = op.Cast<LogicalMaterializedCTE>();
+		state.ctes.emplace(cte.table_index, cte);
+	}
+	for (auto &child : op.children) {
+		CollectMaterializedCTEs(*child, state);
+	}
+}
+
+static DescribedColumnInfo FindDescribedColumn(const DescribeTraceState &state, LogicalOperator &op,
+                                               ColumnBinding binding);
+
+//! Traces an expression that passes a column of the child through unchanged
+static DescribedColumnInfo FindPassThroughColumn(const DescribeTraceState &state, LogicalOperator &child,
+                                                 const Expression &expr) {
+	if (expr.GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
+		return DescribedColumnInfo();
+	}
+	auto &colref = expr.Cast<BoundColumnRefExpression>();
+	if (colref.Depth() > 0) {
+		// a correlated column of an outer query
+		return DescribedColumnInfo();
+	}
+	return FindDescribedColumn(state, child, colref.Binding());
+}
+
+//! Describes a column that the operator produces
+static DescribedColumnInfo DescribeOwnedColumn(const DescribeTraceState &state, LogicalOperator &op,
+                                               ColumnBinding binding) {
 	DescribedColumnInfo result;
-	if (op.type == LogicalOperatorType::LOGICAL_SECURE_VIEW) {
-		// a secure view hides the tables it reads from
-		return result;
-	}
-	auto table_indices = op.GetTableIndex();
-	if (std::find(table_indices.begin(), table_indices.end(), binding.table_index) == table_indices.end()) {
-		// the operator forwards its children's columns - search in children directly
-		for (idx_t child_idx = 0; child_idx < op.children.size(); child_idx++) {
-			if (!ForwardsChildColumns(op, child_idx)) {
-				continue;
-			}
-			result = FindDescribedColumn(*op.children[child_idx], binding);
-			if (result.column) {
-				return result;
-			}
-		}
-		return result;
-	}
 	switch (op.type) {
 	case LogicalOperatorType::LOGICAL_GET: {
 		auto &get = op.Cast<LogicalGet>();
@@ -74,7 +103,7 @@ static DescribedColumnInfo FindDescribedColumn(LogicalOperator &op, ColumnBindin
 		auto base_column_id = get.GetColumnIndex(binding.column_index);
 		if (base_column_id.IsVirtualColumn()) {
 			//! Virtual column (like ROW_ID) does not have a ColumnDefinition entry in the TableCatalogEntry
-			return result;
+			break;
 		}
 		LogicalIndex column_index(base_column_id.GetPrimaryIndex());
 		if (bind_info.table) {
@@ -83,28 +112,86 @@ static DescribedColumnInfo FindDescribedColumn(LogicalOperator &op, ColumnBindin
 		} else if (bind_info.columns && column_index.index < bind_info.columns->LogicalColumnCount()) {
 			result.column = &bind_info.columns->GetColumn(column_index);
 		}
-		return result;
+		break;
 	}
 	case LogicalOperatorType::LOGICAL_PROJECTION: {
 		auto &projection = op.Cast<LogicalProjection>();
-		auto &expr = projection.GetExpression(binding);
-		if (expr.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
-			// if the projection at this index only has a column reference we can directly trace it to the base table
-			auto &bound_colref = expr.Cast<BoundColumnRefExpression>();
-			return FindDescribedColumn(*projection.children[0], bound_colref.Binding());
+		result = FindPassThroughColumn(state, *projection.children[0], projection.GetExpression(binding));
+		break;
+	}
+	case LogicalOperatorType::LOGICAL_CTE_REF: {
+		// a CTE reference reads the columns of the CTE's query
+		auto &cte_ref = op.Cast<LogicalCTERef>();
+		optional_ptr<LogicalOperator> cte_query;
+		auto entry = state.ctes.find(cte_ref.cte_index);
+		if (entry != state.ctes.end()) {
+			cte_query = entry->second.get().children[0].get();
+		} else {
+			// a CTE of a query that encloses the DESCRIBE, or nullptr for a recursive CTE referencing itself
+			cte_query = state.binder.GetBoundCTEQuery(cte_ref.cte_index);
 		}
+		if (!cte_query) {
+			break;
+		}
+		auto cte_bindings = cte_query->GetColumnBindings();
+		if (binding.column_index < cte_bindings.size()) {
+			result = FindDescribedColumn(state, *cte_query, cte_bindings[binding.column_index]);
+		}
+		break;
+	}
+	case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY: {
+		// a group key passes its value through unchanged, but NULL/key/default do not describe the grouped result
+		auto &aggregate = op.Cast<LogicalAggregate>();
+		if (binding.table_index == aggregate.group_index) {
+			result = FindPassThroughColumn(state, *aggregate.children[0], aggregate.GetExpression(binding));
+		} else if (binding.table_index == aggregate.aggregate_index) {
+			// a group key with a collation is selected through a first() aggregate over the uncollated key
+			auto &expr = aggregate.GetExpression(binding);
+			if (expr.GetAlias() == "__collated_group") {
+				auto &children = expr.Cast<BoundAggregateExpression>().GetChildren();
+				if (children.size() == 1) {
+					result = FindPassThroughColumn(state, *aggregate.children[0], *children[0]);
+				}
+			}
+		}
+		result.table = nullptr;
 		break;
 	}
 	default:
 		// the operator produces this column itself and we cannot see through it
 		break;
 	}
+	result.found = true;
 	return result;
 }
 
-static DescribedColumnInfo FindDescribedColumn(LogicalOperator &op, idx_t column_index) {
+static DescribedColumnInfo FindDescribedColumn(const DescribeTraceState &state, LogicalOperator &op,
+                                               ColumnBinding binding) {
+	if (op.type == LogicalOperatorType::LOGICAL_SECURE_VIEW) {
+		// a secure view hides the tables it reads from
+		return DescribedColumnInfo();
+	}
+	auto table_indices = op.GetTableIndex();
+	if (std::find(table_indices.begin(), table_indices.end(), binding.table_index) != table_indices.end()) {
+		return DescribeOwnedColumn(state, op, binding);
+	}
+	// the operator forwards its children's columns - search in children directly
+	for (idx_t child_idx = 0; child_idx < op.children.size(); child_idx++) {
+		if (!ForwardsChildColumns(op, child_idx)) {
+			continue;
+		}
+		auto result = FindDescribedColumn(state, *op.children[child_idx], binding);
+		if (result.found) {
+			return result;
+		}
+	}
+	return DescribedColumnInfo();
+}
+
+static DescribedColumnInfo FindDescribedColumn(const DescribeTraceState &state, LogicalOperator &op,
+                                               idx_t column_index) {
 	auto bindings = op.GetColumnBindings();
-	return FindDescribedColumn(op, bindings[column_index]);
+	return FindDescribedColumn(state, op, bindings[column_index]);
 }
 
 BoundStatement Binder::BindDescribeQuery(ShowRef &ref) {
@@ -122,9 +209,11 @@ BoundStatement Binder::BindDescribeQuery(ShowRef &ref) {
 	auto collection = make_uniq<ColumnDataCollection>(context, return_types);
 	ColumnDataAppendState append_state;
 	collection->InitializeAppend(append_state);
+	DescribeTraceState trace_state(*this);
+	CollectMaterializedCTEs(*plan.plan, trace_state);
 	for (idx_t column_idx = 0; column_idx < plan.types.size(); column_idx++) {
 		// check if we can trace the column to a base table so that we can figure out constraint information
-		auto result = FindDescribedColumn(*plan.plan, column_idx);
+		auto result = FindDescribedColumn(trace_state, *plan.plan, column_idx);
 		idx_t row_index = output.size();
 		auto &alias = plan.names[column_idx];
 		if (result.table) {

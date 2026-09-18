@@ -202,11 +202,16 @@ public:
 	bool CanBeReferenced() const;
 	bool IsReferenced() const;
 	void Reference();
+	//! The plan of the CTE's query, if it has been bound and not yet planned into its materialized CTE. Only valid
+	//! while the query node that defines the CTE is being bound, which owns the plan until FinishCTE.
+	optional_ptr<LogicalOperator> GetBoundQuery() const;
 
 private:
 	CTEType cte_type;
 	idx_t reference_count;
 	shared_ptr<CTEBindState> bind_state;
+	//! The state of the CTE's query once bind_state is released after binding it; owned by the defining query node
+	weak_ptr<CTEBindState> finished_bind_state;
 };
 
 } // namespace duckdb
