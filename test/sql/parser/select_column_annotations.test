@@ -121,6 +121,26 @@ syntax error
 statement ok
 CREATE TABLE tbl(i INTEGER, s STRUCT(a INTEGER, b INTEGER));
 
+statement error
+SELECT COLUMNS(*) AS c COMMENT 'x' FROM tbl;
+----
+COMMENT and TAGS cannot be applied to * or COLUMNS(...)
+
+statement error
+SELECT COLUMNS(*)::VARCHAR AS c TAGS {'k': 'v'} FROM tbl;
+----
+COMMENT and TAGS cannot be applied to * or COLUMNS(...)
+
+statement error
+SELECT COLUMNS(*) + 1 AS c COMMENT 'x' FROM tbl;
+----
+COMMENT and TAGS cannot be applied to * or COLUMNS(...)
+
+statement error
+SELECT unnest(s) AS u COMMENT 'x' FROM tbl;
+----
+COMMENT and TAGS cannot be applied to an UNNEST that expands a struct into multiple columns
+
 # only the SELECT clause accepts COMMENT and TAGS
 statement error
 INSERT INTO tbl VALUES (1, NULL) RETURNING i AS j COMMENT 'x';

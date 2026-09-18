@@ -246,6 +246,26 @@ TableIndex Binder::GenerateTableIndex() {
 	return TableIndex(global_binder_state->bound_tables++);
 }
 
+void Binder::RegisterColumnAnnotation(ColumnBinding binding, shared_ptr<const ColumnAnnotation> annotation) {
+	global_binder_state->column_annotations[binding] = std::move(annotation);
+}
+
+void Binder::CopyColumnAnnotation(ColumnBinding source, ColumnBinding target) {
+	auto &annotations = global_binder_state->column_annotations;
+	auto entry = annotations.find(source);
+	if (entry != annotations.end()) {
+		annotations[target] = entry->second;
+	}
+}
+
+optional_ptr<const ColumnAnnotation> Binder::GetColumnAnnotation(ColumnBinding binding) const {
+	auto entry = global_binder_state->column_annotations.find(binding);
+	if (entry == global_binder_state->column_annotations.end()) {
+		return nullptr;
+	}
+	return entry->second.get();
+}
+
 StatementProperties &Binder::GetStatementProperties() {
 	return global_binder_state->prop;
 }

@@ -39,6 +39,12 @@
         "test/sql/optimizer/secure_view_pushdown.test",
         "test/sql/optimizer/secure_view_statistics.test"
       ]
+    },
+    {
+      "reason": "COMMENT and TAGS in view and macro definitions require v2.0.0 storage.",
+      "paths": [
+        "test/sql/show_select/describe_select_annotations_storage.test"
+      ]
     }
   ]
 }

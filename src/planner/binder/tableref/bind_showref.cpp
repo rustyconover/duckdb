@@ -1,5 +1,6 @@
 #include "duckdb/function/pragma/pragma_functions.hpp"
 #include "duckdb/function/table/system_functions.hpp"
+#include "duckdb/parser/column_annotation.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/parser/tableref/showref.hpp"
 #include "duckdb/parser/tableref/subqueryref.hpp"
@@ -31,8 +32,10 @@ struct DescribedColumnInfo {
 	bool found = false;
 	//! The table column that the column passes through unchanged, which describes NULL, key and default
 	optional_ptr<TableCatalogEntry> table = nullptr;
-	//! The column definition that the column passes through unchanged, which describes its comment and tags
 	optional_ptr<const ColumnDefinition> column = nullptr;
+	//! The resolved comment and tags
+	Value comment;
+	InsertionOrderPreservingMap<string> tags;
 };
 
 static bool ForwardsChildColumns(LogicalOperator &op, idx_t child_idx) {
@@ -53,7 +56,7 @@ struct DescribeTraceState {
 	explicit DescribeTraceState(Binder &binder) : binder(binder) {
 	}
 
-	//! The binder of the DESCRIBE, which holds the CTEs of the queries that enclose it
+	//! The binder of the DESCRIBE, which holds the COMMENT and TAGS declared in select lists and the enclosing CTEs
 	Binder &binder;
 	//! The materialized CTEs of the plan, by table index
 	unordered_map<TableIndex, reference<LogicalMaterializedCTE>> ctes;
@@ -66,6 +69,20 @@ static void CollectMaterializedCTEs(LogicalOperator &op, DescribeTraceState &sta
 	}
 	for (auto &child : op.children) {
 		CollectMaterializedCTEs(*child, state);
+	}
+}
+
+//! Applies the COMMENT and TAGS declared for the column: the comment replaces the inherited one, the tags are merged
+static void ApplyColumnAnnotation(const DescribeTraceState &state, ColumnBinding binding, DescribedColumnInfo &result) {
+	auto annotation = state.binder.GetColumnAnnotation(binding);
+	if (!annotation) {
+		return;
+	}
+	if (!annotation->comment.IsNull()) {
+		result.comment = annotation->comment;
+	}
+	for (auto &tag : annotation->tags) {
+		result.tags[tag.first] = tag.second;
 	}
 }
 
@@ -112,11 +129,16 @@ static DescribedColumnInfo DescribeOwnedColumn(const DescribeTraceState &state, 
 		} else if (bind_info.columns && column_index.index < bind_info.columns->LogicalColumnCount()) {
 			result.column = &bind_info.columns->GetColumn(column_index);
 		}
+		if (result.column) {
+			result.comment = result.column->Comment();
+			result.tags = result.column->Tags();
+		}
 		break;
 	}
 	case LogicalOperatorType::LOGICAL_PROJECTION: {
 		auto &projection = op.Cast<LogicalProjection>();
 		result = FindPassThroughColumn(state, *projection.children[0], projection.GetExpression(binding));
+		ApplyColumnAnnotation(state, binding, result);
 		break;
 	}
 	case LogicalOperatorType::LOGICAL_CTE_REF: {
@@ -155,8 +177,16 @@ static DescribedColumnInfo DescribeOwnedColumn(const DescribeTraceState &state, 
 			}
 		}
 		result.table = nullptr;
+		result.column = nullptr;
 		break;
 	}
+	case LogicalOperatorType::LOGICAL_UNION:
+	case LogicalOperatorType::LOGICAL_EXCEPT:
+	case LogicalOperatorType::LOGICAL_INTERSECT:
+	case LogicalOperatorType::LOGICAL_RECURSIVE_CTE:
+		// only the COMMENT and TAGS declared in the select list of the first child label a set operation's columns
+		ApplyColumnAnnotation(state, binding, result);
+		break;
 	default:
 		// the operator produces this column itself and we cannot see through it
 		break;
@@ -168,7 +198,7 @@ static DescribedColumnInfo DescribeOwnedColumn(const DescribeTraceState &state, 
 static DescribedColumnInfo FindDescribedColumn(const DescribeTraceState &state, LogicalOperator &op,
                                                ColumnBinding binding) {
 	if (op.type == LogicalOperatorType::LOGICAL_SECURE_VIEW) {
-		// a secure view hides the tables it reads from
+		// a secure view hides the tables it reads from and the metadata declared inside it
 		return DescribedColumnInfo();
 	}
 	auto table_indices = op.GetTableIndex();
@@ -223,15 +253,11 @@ BoundStatement Binder::BindDescribeQuery(ShowRef &ref) {
 			if (alias != result.column->Name()) {
 				output.data[0].SetValue(row_index, Value(alias));
 			}
+			// the comment and tags may have been overridden in a select list
+			output.data[5].SetValue(row_index, PragmaTableInfo::GetColumnExtraInfo(result.comment, result.tags));
 		} else {
 			// the column does not come from a table - read the type/name from the plan instead
-			Value comment;
-			InsertionOrderPreservingMap<string> tags;
-			if (result.column) {
-				comment = result.column->Comment();
-				tags = result.column->Tags();
-			}
-			PragmaTableInfo::GetColumnInfo(alias, plan.types[column_idx], comment, tags, output);
+			PragmaTableInfo::GetColumnInfo(alias, plan.types[column_idx], result.comment, result.tags, output);
 		}
 
 		// both branches above append exactly one row to the child vectors, growing output.size() accordingly

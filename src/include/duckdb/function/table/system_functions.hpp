@@ -23,6 +23,8 @@ struct PragmaTableInfo {
 	static void GetShowSchema(vector<LogicalType> &return_types, vector<Identifier> &names);
 	//! Appends a pragma_show / DESCRIBE row for a table column
 	static void GetColumnInfo(TableCatalogEntry &table, const ColumnDefinition &column, DataChunk &output);
+	//! The "extra" value of a pragma_show / DESCRIBE row: the comment and tags as JSON
+	static Value GetColumnExtraInfo(const Value &comment, const InsertionOrderPreservingMap<string> &tags);
 	//! Appends a pragma_show / DESCRIBE row for a column that is not backed by a table column
 	static void GetColumnInfo(const Identifier &name, const LogicalType &type, const Value &comment,
 	                          const InsertionOrderPreservingMap<string> &tags, DataChunk &output);

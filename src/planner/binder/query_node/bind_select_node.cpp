@@ -507,6 +507,19 @@ Identifier Binder::GetExpressionName(const ParsedExpression &expr) {
 	return expr.GetName();
 }
 
+static bool ContainsStarExpression(const ParsedExpression &expr) {
+	if (expr.GetExpressionClass() == ExpressionClass::STAR) {
+		return true;
+	}
+	bool result = false;
+	ParsedExpressionIterator::EnumerateChildren(expr, [&](const ParsedExpression &child) {
+		if (ContainsStarExpression(child)) {
+			result = true;
+		}
+	});
+	return result;
+}
+
 BoundStatement Binder::BindSelectNode(SelectNode &statement, BoundStatement from_table) {
 	D_ASSERT(from_table.plan);
 	D_ASSERT(!statement.from_table);
@@ -526,6 +539,12 @@ BoundStatement Binder::BindSelectNode(SelectNode &statement, BoundStatement from
 		    make_uniq<LogicalSample>(std::move(statement.sample), std::move(result.from_table.plan));
 	}
 
+	for (auto &expr : statement.select_list) {
+		if (expr->GetAnnotation() && ContainsStarExpression(*expr)) {
+			throw BinderException(*expr, "COMMENT and TAGS cannot be applied to * or COLUMNS(...)");
+		}
+	}
+
 	// do this before column expansion to preserve FILTER semantics,
 	// without normalization the enclosing expression would be duplicated once per column
 	NormalizeFilterStarExpressions(statement);
@@ -540,8 +559,14 @@ BoundStatement Binder::BindSelectNode(SelectNode &statement, BoundStatement from
 	statement.select_list = std::move(new_select_list);
 
 	auto &bind_state = result.bind_state;
+	// the COMMENT and TAGS of each entry, taken before binding rewrites the entries (empty if there are none)
+	vector<shared_ptr<const ColumnAnnotation>> select_annotations;
 	for (idx_t i = 0; i < statement.select_list.size(); i++) {
 		auto &expr = statement.select_list[i];
+		if (expr->GetAnnotation()) {
+			select_annotations.resize(statement.select_list.size());
+			select_annotations[i] = expr->GetAnnotation();
+		}
 		result.names.emplace_back(GetExpressionName(*expr));
 		ExpressionBinder::QualifyColumnNames(*this, expr);
 		if (!expr->GetAlias().empty()) {
@@ -681,6 +706,7 @@ BoundStatement Binder::BindSelectNode(SelectNode &statement, BoundStatement from
 	// adjust the column index of the already bound ORDER BY modifiers, and not only set their types
 	vector<idx_t> group_by_all_indexes;
 	vector<Identifier> new_names;
+	vector<shared_ptr<const ColumnAnnotation>> new_annotations;
 	vector<LogicalType> internal_sql_types;
 
 	for (idx_t i = 0; i < statement.select_list.size(); i++) {
@@ -700,6 +726,10 @@ BoundStatement Binder::BindSelectNode(SelectNode &statement, BoundStatement from
 			if (statement.aggregate_handling == AggregateHandling::FORCE_AGGREGATES) {
 				throw BinderException("UNNEST of struct cannot be combined with GROUP BY ALL");
 			}
+			if (!select_annotations.empty() && select_annotations[i]) {
+				throw BinderException(*expr, "COMMENT and TAGS cannot be applied to an UNNEST that expands a struct "
+				                             "into multiple columns");
+			}
 
 			auto &expanded = expr->Cast<BoundExpandedExpression>();
 			auto &struct_expressions = expanded.GetChildrenMutable();
@@ -709,6 +739,9 @@ BoundStatement Binder::BindSelectNode(SelectNode &statement, BoundStatement from
 
 			for (auto &struct_expr : struct_expressions) {
 				new_names.emplace_back(struct_expr->GetName());
+				if (!select_annotations.empty()) {
+					new_annotations.emplace_back();
+				}
 				result.types.push_back(struct_expr->GetReturnType());
 				internal_sql_types.push_back(struct_expr->GetReturnType());
 				result.select_list.push_back(std::move(struct_expr));
@@ -743,6 +776,9 @@ BoundStatement Binder::BindSelectNode(SelectNode &statement, BoundStatement from
 		result.select_list.push_back(std::move(expr));
 		if (is_original_column) {
 			new_names.push_back(std::move(result.names[i]));
+			if (!select_annotations.empty()) {
+				new_annotations.push_back(select_annotations[i]);
+			}
 			result.types.push_back(result_type);
 		}
 		internal_sql_types.push_back(result_type);
@@ -820,6 +856,15 @@ BoundStatement Binder::BindSelectNode(SelectNode &statement, BoundStatement from
 	result_statement.types = result.types;
 	result_statement.names = result.names;
 	result_statement.plan = CreatePlan(result);
+	if (!select_annotations.empty()) {
+		// recorded by the columns the plan returns, which set operations over this node read
+		auto bindings = result_statement.plan->GetColumnBindings();
+		for (idx_t i = 0; i < new_annotations.size() && i < bindings.size(); i++) {
+			if (new_annotations[i]) {
+				RegisterColumnAnnotation(bindings[i], new_annotations[i]);
+			}
+		}
+	}
 	result_statement.extra_info.original_expressions = std::move(result.bind_state.original_expressions);
 	return result_statement;
 }
