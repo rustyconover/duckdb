@@ -474,6 +474,27 @@
     "pointer_type": "none"
   },
   {
+    "class": "ColumnAnnotation",
+    "includes": [
+      "duckdb/parser/column_annotation.hpp"
+    ],
+    "members": [
+      {
+        "id": 100,
+        "name": "comment",
+        "type": "Value",
+        "default": "Value()"
+      },
+      {
+        "id": 101,
+        "name": "tags",
+        "type": "InsertionOrderPreservingMap<string>",
+        "default": "InsertionOrderPreservingMap<string>()"
+      }
+    ],
+    "pointer_type": "shared_ptr"
+  },
+  {
     "class": "ColumnDefinition",
     "includes": [
       "duckdb/parser/column_definition.hpp"

@@ -1,0 +1,158 @@
+# name: test/sql/parser/select_column_annotations.test
+# description: COMMENT and TAGS after the alias of a SELECT list entry
+# group: [parser]
+
+query II
+SELECT 42 AS a COMMENT 'answer', 'x' AS b TAGS {'k': 'v'};
+----
+42	x
+
+# either order, and the prefix alias form
+query III
+SELECT 1 AS a COMMENT 'c' TAGS {'k': 'v'}, 2 AS b TAGS {'k': 'v'} COMMENT 'c', c: 3 COMMENT 'c';
+----
+1	2	3
+
+query I
+FROM range(2) SELECT range AS r COMMENT 'row number';
+----
+0
+1
+
+# annotations do not change the result of the query
+query I
+SELECT i AS a COMMENT 'x' TAGS {'k': 'v'} FROM range(3) t(i) ORDER BY a DESC;
+----
+2
+1
+0
+
+query II
+SELECT i AS a COMMENT 'x', count(*) AS n TAGS {'k': 'v'} FROM range(3) t(i) GROUP BY ALL ORDER BY ALL;
+----
+0	1
+1	1
+2	1
+
+# any string literal form
+query I
+SELECT 42 AS a COMMENT 'it''s "quoted"' TAGS {'k''': $$dollar 'quoted'$$, 'e': E'line\nbreak'};
+----
+42
+
+# like TAG ON ... SET, TAGS needs at least one tag
+statement error
+SELECT 42 AS a TAGS {};
+----
+syntax error
+
+# annotations are kept in a view definition
+statement ok
+CREATE TEMP VIEW annotated AS SELECT 42 AS a COMMENT 'answer' TAGS {'k': 'v'};
+
+query I
+FROM annotated;
+----
+42
+
+statement error
+SELECT 42 AS a COMMENT 'x' COMMENT 'y';
+----
+COMMENT specified more than once for column a
+
+statement error
+SELECT 42 AS a TAGS {'k': 'v'} TAGS {'j': 'w'};
+----
+TAGS specified more than once for column a
+
+# tag keys are compared case-insensitively
+statement error
+SELECT 42 AS a TAGS {'k': 'v', 'K': 'w'};
+----
+Tag 'K' should be specified at most once for column a
+
+# COMMENT and the tag keys and values are string literals
+statement error
+SELECT 42 AS a TAGS {'k': 1};
+----
+syntax error
+
+statement error
+SELECT 42 AS a TAGS {'k': 'v' || 'w'};
+----
+syntax error
+
+statement error
+SELECT 42 AS a COMMENT 'a' || 'b';
+----
+syntax error
+
+statement error
+SELECT 42 AS a COMMENT ('a');
+----
+syntax error
+
+statement error
+SELECT 42 AS a COMMENT NULL;
+----
+syntax error
+
+statement error
+PREPARE p AS SELECT 42 AS a COMMENT ?;
+----
+syntax error
+
+statement error
+SELECT 42 AS a TAGS {k: 'v'};
+----
+syntax error
+
+# COMMENT and TAGS need an explicit alias
+statement error
+SELECT 42 COMMENT 'x';
+----
+syntax error
+
+statement error
+SELECT 42 a COMMENT 'x';
+----
+syntax error
+
+statement ok
+CREATE TABLE tbl(i INTEGER, s STRUCT(a INTEGER, b INTEGER));
+
+# only the SELECT clause accepts COMMENT and TAGS
+statement error
+INSERT INTO tbl VALUES (1, NULL) RETURNING i AS j COMMENT 'x';
+----
+syntax error
+
+statement error
+PIVOT tbl ON i USING sum(i) AS total COMMENT 'x';
+----
+syntax error
+
+statement error
+UNPIVOT tbl ON i AS j COMMENT 'x' INTO NAME n VALUE v;
+----
+syntax error
+
+# COMMENT and TAGS remain usable as identifiers
+statement ok
+CREATE TABLE words(comment VARCHAR, tags VARCHAR);
+
+statement ok
+INSERT INTO words VALUES ('c', 't');
+
+query IIII
+SELECT comment, tags, comment AS tags, 1 comment FROM words;
+----
+c	t	c	1
+
+query II
+SELECT 42 tags, 43 AS comment;
+----
+42	43
+
+statement ok
+COMMENT ON COLUMN words.comment IS 'still a column';

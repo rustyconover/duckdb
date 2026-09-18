@@ -5,6 +5,7 @@
 #include "duckdb/parser/peg/transformer/parse_result.hpp"
 #include "duckdb/parser/peg/transformer/transform_result.hpp"
 #include "duckdb/parser/peg/ast/add_column_entry.hpp"
+#include "duckdb/parser/peg/ast/column_annotation_clause.hpp"
 #include "duckdb/parser/peg/ast/column_constraint_entry.hpp"
 #include "duckdb/parser/peg/ast/analyze_target.hpp"
 #include "duckdb/parser/peg/ast/column_elements.hpp"
@@ -90,6 +91,7 @@ DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.BinaryExpressionT
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.CaseCheck", CaseCheck);
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.CastArguments", CastArguments);
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.CatalogType", CatalogType);
+DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.ColumnAnnotationClause", ColumnAnnotationClause);
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.ColumnConstraintEntry", ColumnConstraintEntry);
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.ColumnElements", ColumnElements);
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.ColumnList", ColumnList);
@@ -174,6 +176,7 @@ DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.pair<QualifiedCol
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.pair<SampleMethod, optional_idx>",
                                       pair<SampleMethod, optional_idx>);
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.pair<string, bool>", pair<string, bool>);
+DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.pair<string, string>", pair<string, string>);
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.pair<string, unique_ptr<ParsedExpression>>",
                                       pair<string, unique_ptr<ParsedExpression>>);
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.pair<string, unique_ptr<SequenceOption>>",
@@ -232,6 +235,8 @@ DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.vector<PivotColum
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.vector<WindowBoundaryExpression>",
                                       vector<WindowBoundaryExpression>);
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.vector<bool>", vector<bool>);
+DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.vector<pair<string, string>>",
+                                      vector<pair<string, string>>);
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.vector<string>", vector<string>);
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.vector<unique_ptr<ParsedExpression>>",
                                       vector<unique_ptr<ParsedExpression>>);
@@ -3850,6 +3855,35 @@ public:
 	                                                        GeneratedTransformProcess &process);
 	static unique_ptr<TransformResultValue>
 	FinalizeExpressionOptIdentifierTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
+	static void InitializeSelectTargetListTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
+	static unique_ptr<TransformResultValue> FinalizeSelectTargetListTrampoline(PEGTransformer &transformer,
+	                                                                           GeneratedTransformProcess &process);
+	static void InitializeSelectTargetEntryTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
+	static unique_ptr<TransformResultValue> FinalizeSelectTargetEntryTrampoline(PEGTransformer &transformer,
+	                                                                            GeneratedTransformProcess &process);
+	static void InitializeAnnotatedTargetTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
+	static unique_ptr<TransformResultValue> FinalizeAnnotatedTargetTrampoline(PEGTransformer &transformer,
+	                                                                          GeneratedTransformProcess &process);
+	static void InitializeExplicitAliasTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
+	static unique_ptr<TransformResultValue> FinalizeExplicitAliasTrampoline(PEGTransformer &transformer,
+	                                                                        GeneratedTransformProcess &process);
+	static void InitializeColumnAnnotationTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
+	static unique_ptr<TransformResultValue> FinalizeColumnAnnotationTrampoline(PEGTransformer &transformer,
+	                                                                           GeneratedTransformProcess &process);
+	static void InitializeColumnCommentAnnotationTrampoline(PEGTransformer &transformer,
+	                                                        GeneratedTransformProcess &process);
+	static unique_ptr<TransformResultValue>
+	FinalizeColumnCommentAnnotationTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
+	static void InitializeColumnTagsAnnotationTrampoline(PEGTransformer &transformer,
+	                                                     GeneratedTransformProcess &process);
+	static unique_ptr<TransformResultValue> FinalizeColumnTagsAnnotationTrampoline(PEGTransformer &transformer,
+	                                                                               GeneratedTransformProcess &process);
+	static void InitializeColumnTagListTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
+	static unique_ptr<TransformResultValue> FinalizeColumnTagListTrampoline(PEGTransformer &transformer,
+	                                                                        GeneratedTransformProcess &process);
+	static void InitializeColumnTagEntryTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
+	static unique_ptr<TransformResultValue> FinalizeColumnTagEntryTrampoline(PEGTransformer &transformer,
+	                                                                         GeneratedTransformProcess &process);
 	static void InitializeValuesClauseTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
 	static unique_ptr<TransformResultValue> FinalizeValuesClauseTrampoline(PEGTransformer &transformer,
 	                                                                       GeneratedTransformProcess &process);
@@ -5631,6 +5665,19 @@ public:
 	static unique_ptr<ParsedExpression> TransformExpressionOptIdentifier(PEGTransformer &transformer,
 	                                                                     unique_ptr<ParsedExpression> expression,
 	                                                                     const optional<Identifier> &identifier);
+	static vector<unique_ptr<ParsedExpression>>
+	TransformSelectTargetList(PEGTransformer &transformer, vector<unique_ptr<ParsedExpression>> select_target_entry);
+	static unique_ptr<ParsedExpression>
+	TransformAnnotatedTarget(PEGTransformer &transformer, unique_ptr<ParsedExpression> explicit_alias,
+	                         optional<vector<ColumnAnnotationClause>> column_annotation);
+	static ColumnAnnotationClause TransformColumnCommentAnnotation(PEGTransformer &transformer,
+	                                                               const string &string_literal);
+	static ColumnAnnotationClause TransformColumnTagsAnnotation(PEGTransformer &transformer,
+	                                                            vector<pair<string, string>> column_tag_list);
+	static vector<pair<string, string>> TransformColumnTagList(PEGTransformer &transformer,
+	                                                           vector<pair<string, string>> column_tag_entry);
+	static pair<string, string> TransformColumnTagEntry(PEGTransformer &transformer, const string &string_literal,
+	                                                    const string &string_literal_1);
 	static unique_ptr<SelectStatement>
 	TransformValuesClause(PEGTransformer &transformer, vector<vector<unique_ptr<ParsedExpression>>> values_expressions);
 	static vector<unique_ptr<ParsedExpression>>

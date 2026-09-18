@@ -19,6 +19,7 @@
 #include "duckdb/common/queue.hpp"
 #include "duckdb/parser/tableref/pivotref.hpp"
 #include "duckdb/planner/tableref/bound_pivotref.hpp"
+#include "duckdb/parser/column_annotation.hpp"
 #include "duckdb/parser/column_definition.hpp"
 #include "duckdb/parser/column_list.hpp"
 #include "duckdb/planner/column_binding.hpp"
@@ -201,6 +202,18 @@ CaseCheck CaseCheck::Deserialize(Deserializer &deserializer) {
 	CaseCheck result;
 	deserializer.ReadPropertyWithDefault<unique_ptr<ParsedExpression>>(100, "when_expr", result.when_expr);
 	deserializer.ReadPropertyWithDefault<unique_ptr<ParsedExpression>>(101, "then_expr", result.then_expr);
+	return result;
+}
+
+void ColumnAnnotation::Serialize(Serializer &serializer) const {
+	serializer.WritePropertyWithDefault<Value>(100, "comment", comment, Value());
+	serializer.WritePropertyWithDefault<InsertionOrderPreservingMap<string>>(101, "tags", tags, InsertionOrderPreservingMap<string>());
+}
+
+shared_ptr<ColumnAnnotation> ColumnAnnotation::Deserialize(Deserializer &deserializer) {
+	auto result = duckdb::shared_ptr<ColumnAnnotation>(new ColumnAnnotation());
+	deserializer.ReadPropertyWithExplicitDefault<Value>(100, "comment", result->comment, Value());
+	deserializer.ReadPropertyWithExplicitDefault<InsertionOrderPreservingMap<string>>(101, "tags", result->tags, InsertionOrderPreservingMap<string>());
 	return result;
 }
 

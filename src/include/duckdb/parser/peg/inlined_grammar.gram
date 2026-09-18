@@ -1751,7 +1751,7 @@ UsingKey <- 'USING' 'KEY' Parens(TargetList)
 Materialized <- 'NOT'? 'MATERIALIZED'
 WithClause <- 'WITH' Recursive? List(WithStatement)
 Recursive <- 'RECURSIVE'
-SelectClause <- 'SELECT' DistinctClause? TargetList?
+SelectClause <- 'SELECT' DistinctClause? SelectTargetList?
 TargetList <- List(AliasedExpression)
 ColumnAliases <- Parens(List(ColIdOrString))
 
@@ -1923,6 +1923,17 @@ AliasedExpression <- ColIdExpression / ExpressionAsCollabel / ExpressionOptIdent
 ColIdExpression <- ColId ':' Expression
 ExpressionAsCollabel <- Expression 'AS' ColLabelOrString
 ExpressionOptIdentifier <- Expression Identifier?
+
+# the SELECT clause's target list additionally accepts COMMENT and TAGS after an explicit alias
+SelectTargetList <- List(SelectTargetEntry)
+SelectTargetEntry <- AnnotatedTarget / ExpressionOptIdentifier
+AnnotatedTarget <- ExplicitAlias ColumnAnnotation*
+ExplicitAlias <- ColIdExpression / ExpressionAsCollabel
+ColumnAnnotation <- ColumnCommentAnnotation / ColumnTagsAnnotation
+ColumnCommentAnnotation <- 'COMMENT' StringLiteral
+ColumnTagsAnnotation <- 'TAGS' '{' ColumnTagList '}'
+ColumnTagList <- List(ColumnTagEntry)
+ColumnTagEntry <- StringLiteral ':' StringLiteral
 
 ValuesClause <- 'VALUES' List(ValuesExpressions)
 ValuesExpressions <- Parens(List(Expression))

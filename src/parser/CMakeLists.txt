@@ -10,6 +10,7 @@ add_library_unity(
   duckdb_parser
   OBJECT
   base_expression.cpp
+  column_annotation.cpp
   common_table_expression_info.cpp
   column_definition.cpp
   column_list.cpp
