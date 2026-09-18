@@ -318,6 +318,8 @@ public:
 
 	//! Find all candidate common table expression by name; returns empty vector if none exists
 	optional_ptr<CTEBinding> GetCTEBinding(const BindingAlias &name);
+	//! Returns the plan of the query of a CTE in scope that has been bound, by the CTE's index
+	optional_ptr<LogicalOperator> GetBoundCTEQuery(TableIndex cte_index);
 
 	//! Add the view to the set of currently bound views - used for detecting recursive view definitions
 	void AddBoundView(ViewCatalogEntry &view);

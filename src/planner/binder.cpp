@@ -192,6 +192,21 @@ BoundStatement Binder::Bind(TableRef &ref) {
 	return result;
 }
 
+optional_ptr<LogicalOperator> Binder::GetBoundCTEQuery(TableIndex cte_index) {
+	reference<Binder> current_binder(*this);
+	while (true) {
+		auto &current = current_binder.get();
+		auto entry = current.bind_context.GetCTEBinding(cte_index);
+		if (entry) {
+			return entry->GetBoundQuery();
+		}
+		if (!current.parent || current.binder_type != BinderType::REGULAR_BINDER) {
+			return nullptr;
+		}
+		current_binder = *current.parent;
+	}
+}
+
 optional_ptr<CTEBinding> Binder::GetCTEBinding(const BindingAlias &name) {
 	reference<Binder> current_binder(*this);
 	optional_ptr<CTEBinding> result;
