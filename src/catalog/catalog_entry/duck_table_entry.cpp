@@ -331,7 +331,6 @@ unique_ptr<CatalogEntry> DuckTableEntry::AlterEntry(ClientContext &context, Alte
 		auto &rename_info = table_info.Cast<RenameTableInfo>();
 		auto copied_table = Copy(context);
 		copied_table->name = rename_info.new_table_name;
-		storage->SetTableName(rename_info.new_table_name);
 		return copied_table;
 	}
 	case AlterTableType::ADD_COLUMN: {
@@ -416,25 +415,25 @@ static void RenameExpression(ParsedExpression &root_expr, RenameColumnInfo &info
 
 // Keep struct literal defaults aligned with nested field renames.
 static unique_ptr<ParsedExpression> RemapStructDefault(unique_ptr<ParsedExpression> default_value,
-                                                       const LogicalType &new_type, const Value &mapping) {
+                                                       const LogicalType &new_type,
+                                                       unique_ptr<ParsedExpression> mapping) {
 	vector<unique_ptr<ParsedExpression>> children;
 	children.push_back(std::move(default_value));
-	children.push_back(make_uniq<ConstantExpression>(Value(new_type)));
-	children.push_back(make_uniq<ConstantExpression>(mapping.Copy()));
-	children.push_back(make_uniq<ConstantExpression>(Value()));
+	children.push_back(ConstantExpression::FromValue(Value(new_type)));
+	children.push_back(std::move(mapping));
+	children.push_back(ConstantExpression::Null());
 	return make_uniq<FunctionExpression>("remap_struct", std::move(children));
 }
 
-static const Value &GetRemapStructMapping(ChangeColumnTypeInfo &info) {
+//! The mapping argument of the remap_struct call, so nested defaults can be remapped with the same mapping
+static unique_ptr<ParsedExpression> GetRemapStructMapping(ChangeColumnTypeInfo &info) {
 	D_ASSERT(info.expression);
 	D_ASSERT(info.expression->GetExpressionClass() == ExpressionClass::FUNCTION);
 	auto &function = info.expression->Cast<FunctionExpression>();
 	D_ASSERT(function.FunctionName() == "remap_struct");
 	auto &arguments = function.GetArguments();
 	D_ASSERT(arguments.size() == 4);
-	auto &mapping = arguments[2].GetExpression();
-	D_ASSERT(mapping.GetExpressionClass() == ExpressionClass::CONSTANT);
-	return mapping.Cast<ConstantExpression>().GetValue();
+	return arguments[2].GetExpression().Copy();
 }
 
 unique_ptr<CatalogEntry> DuckTableEntry::RenameColumn(ClientContext &context, RenameColumnInfo &info) {
@@ -629,24 +628,6 @@ static child_list_t<LogicalType> GetChildList(const LogicalType &type) {
 	return child_types;
 }
 
-static LogicalType ConstructNewType(const LogicalType &original_type, child_list_t<LogicalType> new_child_types) {
-	switch (original_type.id()) {
-	case LogicalTypeId::STRUCT: {
-		return LogicalType::STRUCT(std::move(new_child_types));
-	}
-	case LogicalTypeId::LIST: {
-		D_ASSERT(new_child_types.size() == 1);
-		return LogicalType::LIST(new_child_types[0].second);
-	}
-	case LogicalTypeId::MAP: {
-		D_ASSERT(new_child_types.size() == 2);
-		return LogicalType::MAP(new_child_types[0].second, new_child_types[1].second);
-	}
-	default:
-		throw BinderException("Type '%s' not supported for ADD COLUMN", original_type.ToString());
-	}
-}
-
 Value ConstructMapping(const Identifier &name, const LogicalType &type) {
 	if (!type.IsNested()) {
 		return Value(name);
@@ -701,7 +682,7 @@ StructMappingInfo AddFieldToStruct(const LogicalType &type, const vector<Identif
 		if (new_field.HasDefaultValue()) {
 			default_value = new_field.DefaultValue().Copy();
 		} else {
-			default_value = make_uniq<ConstantExpression>(Value(new_field.Type()));
+			default_value = ConstantExpression::FromValue(Value(new_field.Type()));
 		}
 		result.default_value = PackExpression(std::move(default_value), new_field.Name());
 		return result;
@@ -730,7 +711,7 @@ StructMappingInfo AddFieldToStruct(const LogicalType &type, const vector<Identif
 	if (!found) {
 		throw BinderException("Sub-field %s does not exist in column %s", next_component, column_path[depth]);
 	}
-	result.new_type = ConstructNewType(type, std::move(child_list));
+	result.new_type = LogicalType::ConstructNestedType(type, std::move(child_list));
 	return result;
 }
 
@@ -749,8 +730,8 @@ unique_ptr<CatalogEntry> DuckTableEntry::AddField(ClientContext &context, AddFie
 	// construct the struct remapping expression
 	vector<unique_ptr<ParsedExpression>> children;
 	children.push_back(make_uniq<ColumnRefExpression>(info.column_path[0]));
-	children.push_back(make_uniq<ConstantExpression>(Value(res.new_type)));
-	children.push_back(make_uniq<ConstantExpression>(ConstructMapping(col.Name(), col.Type())));
+	children.push_back(ConstantExpression::FromValue(Value(res.new_type)));
+	children.push_back(ConstantExpression::FromValue(ConstructMapping(col.Name(), col.Type())));
 	D_ASSERT(res.default_value);
 	children.push_back(std::move(res.default_value));
 
@@ -815,19 +796,18 @@ void DuckTableEntry::UpdateConstraintsOnColumnDrop(const LogicalIndex &removed_i
 			if (unique.HasIndex()) {
 				// Single-column UNIQUE constraint
 				if (unique.GetIndex() == removed_index) {
-					throw CatalogException(
-					    "Cannot drop column %s because there is a UNIQUE constraint that depends on it",
-					    info.removed_column);
+					string constraint_type = unique.IsPrimaryKey() ? "PRIMARY KEY" : "UNIQUE";
+					throw CatalogException("Cannot drop column %s because there is a %s constraint that depends on it",
+					                       info.removed_column, constraint_type);
 				}
 				unique.SetIndex(adjusted_indices[unique.GetIndex().index]);
 			} else {
 				// Multi-column UNIQUE constraint - check if any column matches the one being dropped
 				for (const auto &col_name : unique.GetColumnNames()) {
 					if (col_name == info.removed_column) {
-						// Build constraint string for error message: UNIQUE(col1, col2, ...)
-						auto constraint_str = "UNIQUE(" + StringUtil::Join(unique.GetColumnNames(), ", ") + ")";
-						throw CatalogException("Cannot drop column %s because it is referenced in unique constraint %s",
-						                       info.removed_column, constraint_str);
+						string constraint_kind = unique.IsPrimaryKey() ? "primary key" : "unique";
+						throw CatalogException("Cannot drop column %s because it is referenced in %s constraint %s",
+						                       info.removed_column, constraint_kind, unique.ToString());
 					}
 				}
 			}
@@ -979,7 +959,7 @@ DroppedFieldMapping DropFieldFromStruct(const LogicalType &type, const vector<Id
 		result.error = ErrorData(CatalogException("Cannot drop field \"%s\" - it does not exist", dropped_entry));
 	} else {
 		result.mapping = Value::STRUCT(std::move(child_mapping));
-		result.new_type = ConstructNewType(type, std::move(new_type_children));
+		result.new_type = LogicalType::ConstructNestedType(type, std::move(new_type_children));
 	}
 	return result;
 }
@@ -1004,9 +984,9 @@ unique_ptr<CatalogEntry> DuckTableEntry::RemoveField(ClientContext &context, Rem
 	// construct the struct remapping expression
 	vector<unique_ptr<ParsedExpression>> children;
 	children.push_back(make_uniq<ColumnRefExpression>(info.column_path[0]));
-	children.push_back(make_uniq<ConstantExpression>(Value(res.new_type)));
-	children.push_back(make_uniq<ConstantExpression>(std::move(res.mapping)));
-	children.push_back(make_uniq<ConstantExpression>(Value()));
+	children.push_back(ConstantExpression::FromValue(Value(res.new_type)));
+	children.push_back(ConstantExpression::FromValue(res.mapping));
+	children.push_back(ConstantExpression::Null());
 
 	auto function = make_uniq<FunctionExpression>("remap_struct", std::move(children));
 
@@ -1079,7 +1059,7 @@ DroppedFieldMapping RenameFieldFromStruct(const LogicalType &type, const vector<
 		result.error = ErrorData(CatalogException("Cannot rename field \"%s\" - it does not exist", rename_entry));
 	} else {
 		result.mapping = Value::STRUCT(std::move(child_mapping));
-		result.new_type = ConstructNewType(type, std::move(new_type_children));
+		result.new_type = LogicalType::ConstructNestedType(type, std::move(new_type_children));
 	}
 	return result;
 }
@@ -1099,9 +1079,9 @@ unique_ptr<CatalogEntry> DuckTableEntry::RenameField(ClientContext &context, Ren
 	// construct the struct remapping expression
 	vector<unique_ptr<ParsedExpression>> children;
 	children.push_back(make_uniq<ColumnRefExpression>(info.column_path[0]));
-	children.push_back(make_uniq<ConstantExpression>(Value(res.new_type)));
-	children.push_back(make_uniq<ConstantExpression>(std::move(res.mapping)));
-	children.push_back(make_uniq<ConstantExpression>(Value()));
+	children.push_back(ConstantExpression::FromValue(Value(res.new_type)));
+	children.push_back(ConstantExpression::FromValue(res.mapping));
+	children.push_back(ConstantExpression::Null());
 
 	auto function = make_uniq<FunctionExpression>("remap_struct", std::move(children));
 	ChangeColumnTypeInfo change_column_type(info.GetAlterEntryData(), info.column_path[0], std::move(res.new_type),
@@ -1140,16 +1120,7 @@ unique_ptr<CatalogEntry> DuckTableEntry::SetNotNull(ClientContext &context, SetN
 	auto create_info = GetInfo();
 	auto &table_info = create_info->Cast<CreateTableInfo>();
 
-	bool has_not_null = false;
-	for (auto &constraint : table_info.constraints) {
-		if (constraint->type == ConstraintType::NOT_NULL) {
-			auto &not_null = constraint->Cast<NotNullConstraint>();
-			if (not_null.index == not_null_idx) {
-				has_not_null = true;
-				break;
-			}
-		}
-	}
+	bool has_not_null = table_info.FindNotNullConstraint(not_null_idx).IsValid();
 	if (!has_not_null) {
 		table_info.constraints.push_back(make_uniq<NotNullConstraint>(not_null_idx));
 	}
@@ -1185,15 +1156,9 @@ unique_ptr<CatalogEntry> DuckTableEntry::DropNotNull(ClientContext &context, Dro
 	auto &table_info = create_info->Cast<CreateTableInfo>();
 
 	// Remove the NOT NULL constraint for the specified column
-	for (idx_t i = 0; i < table_info.constraints.size(); i++) {
-		auto &constraint = table_info.constraints[i];
-		if (constraint->type == ConstraintType::NOT_NULL) {
-			auto &not_null = constraint->Cast<NotNullConstraint>();
-			if (not_null.index == not_null_idx) {
-				table_info.constraints.erase(table_info.constraints.begin() + static_cast<ptrdiff_t>(i));
-				break;
-			}
-		}
+	auto not_null_constraint = table_info.FindNotNullConstraint(not_null_idx);
+	if (not_null_constraint.IsValid()) {
+		table_info.constraints.erase_at(not_null_constraint.GetIndex());
 	}
 
 	auto binder = Binder::CreateBinder(context);
