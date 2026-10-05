@@ -326,6 +326,8 @@ public:
 	void CopyColumnAnnotation(ColumnBinding source, ColumnBinding target);
 	//! Returns the COMMENT and TAGS declared for an output column, if any
 	optional_ptr<const ColumnAnnotation> GetColumnAnnotation(ColumnBinding binding) const;
+	//! Returns the comment and tags that DESCRIBE reports for each output column of a bound plan
+	vector<ColumnAnnotation> DescribeColumnAnnotations(LogicalOperator &plan);
 
 	optional_ptr<CatalogEntry> GetCatalogEntry(const Identifier &catalog, const Identifier &schema,
 	                                           const EntryLookupInfo &lookup_info, OnEntryNotFound on_entry_not_found);

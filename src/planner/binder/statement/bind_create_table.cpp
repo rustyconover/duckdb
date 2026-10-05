@@ -1,3 +1,4 @@
+#include "duckdb/parser/column_annotation.hpp"
 #include "duckdb/parser/constraints/list.hpp"
 #include "duckdb/parser/expression/cast_expression.hpp"
 #include "duckdb/planner/binder.hpp"
@@ -632,6 +633,9 @@ unique_ptr<BoundCreateTableInfo> Binder::BindCreateTableInfo(unique_ptr<CreateIn
 		auto query_obj = Bind(*base.query);
 		base.query.reset();
 		result->query = std::move(query_obj.plan);
+		// each column stores the comment and tags that DESCRIBE reports for the query's column
+		auto query_annotations = DescribeColumnAnnotations(*result->query);
+		query_annotations.resize(query_obj.types.size());
 
 		// construct the set of columns based on the names and types of the query
 		auto &names = query_obj.names;
@@ -653,12 +657,28 @@ unique_ptr<BoundCreateTableInfo> Binder::BindCreateTableInfo(unique_ptr<CreateIn
 			}
 			ColumnList new_columns;
 			for (idx_t i = 0; i < target_col_names.size(); i++) {
-				new_columns.AddColumn(ColumnDefinition(Identifier(target_col_names[i]), sql_types[i]));
+				ColumnDefinition column(Identifier(target_col_names[i]), sql_types[i]);
+				query_annotations[i].ApplyTo(column);
+				if (i < base.columns.LogicalColumnCount()) {
+					// the comment and tags declared in the column list override the query's
+					auto &target = base.columns.GetColumn(LogicalIndex(i));
+					if (!target.Comment().IsNull()) {
+						column.SetComment(target.Comment());
+					}
+					auto tags = column.Tags();
+					for (auto &tag : target.Tags()) {
+						tags[tag.first] = tag.second;
+					}
+					column.SetTags(std::move(tags));
+				}
+				new_columns.AddColumn(std::move(column));
 			}
 			base.columns = std::move(new_columns);
 		} else {
 			for (idx_t i = 0; i < names.size(); i++) {
-				base.columns.AddColumn(ColumnDefinition(names[i], sql_types[i]));
+				ColumnDefinition column(names[i], sql_types[i]);
+				query_annotations[i].ApplyTo(column);
+				base.columns.AddColumn(std::move(column));
 			}
 		}
 

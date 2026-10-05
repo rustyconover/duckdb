@@ -1,0 +1,164 @@
+# name: test/sql/catalog/annotations/create_table_as_annotations.test
+# description: CREATE TABLE AS stores the comment and tags that DESCRIBE reports for its query
+# group: [annotations]
+
+statement ok
+CREATE TABLE orders (
+	id INTEGER PRIMARY KEY,
+	customer_email VARCHAR TAGS {'pii': 'email'},
+	amount DECIMAL(10, 2) COMMENT 'Order total including tax' TAGS {'unit': 'USD'}
+);
+
+statement ok
+INSERT INTO orders VALUES (1, 'a@b.c', 12), (2, 'd@e.f', 24);
+
+statement ok
+CREATE TABLE order_facts AS
+SELECT id, customer_email, amount,
+       amount / 1.2 AS net_amount COMMENT 'Order total before 20% VAT' TAGS {'unit': 'USD'}
+FROM orders;
+
+query III
+SELECT column_name, comment, tags FROM duckdb_columns() WHERE table_name = 'order_facts' ORDER BY column_index;
+----
+id	NULL	{}
+customer_email	NULL	{pii=email}
+amount	Order total including tax	{unit=USD}
+net_amount	Order total before 20% VAT	{unit=USD}
+
+# the stored metadata matches DESCRIBE of the query
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT id, customer_email, amount,
+       amount / 1.2 AS net_amount COMMENT 'Order total before 20% VAT' TAGS {'unit': 'USD'}
+FROM orders);
+----
+id	NULL
+customer_email	{"tags":{"pii":"email"}}
+amount	{"comment":"Order total including tax","tags":{"unit":"USD"}}
+net_amount	{"comment":"Order total before 20% VAT","tags":{"unit":"USD"}}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE order_facts);
+----
+id	NULL
+customer_email	{"tags":{"pii":"email"}}
+amount	{"comment":"Order total including tax","tags":{"unit":"USD"}}
+net_amount	{"comment":"Order total before 20% VAT","tags":{"unit":"USD"}}
+
+# computed columns inherit nothing
+statement ok
+CREATE TABLE totals AS SELECT customer_email, sum(amount) AS total FROM orders GROUP BY customer_email;
+
+query III
+SELECT column_name, comment, tags FROM duckdb_columns() WHERE table_name = 'totals' ORDER BY column_index;
+----
+customer_email	NULL	{pii=email}
+total	NULL	{}
+
+# a column list overrides: the comment replaces the inherited one and the tags are merged
+statement ok
+CREATE TABLE renamed (key, email COMMENT 'customer address' TAGS {'pii': 'contact', 'owner': 'crm'}) AS
+SELECT id, customer_email, amount FROM orders;
+
+query III
+SELECT column_name, comment, tags FROM duckdb_columns() WHERE table_name = 'renamed' ORDER BY column_index;
+----
+key	NULL	{}
+email	customer address	{pii=contact, owner=crm}
+amount	Order total including tax	{unit=USD}
+
+# table-level COMMENT and TAGS go before AS
+statement ok
+CREATE TABLE summary COMMENT 'per customer totals' TAGS {'domain': 'sales'} AS
+SELECT customer_email, count(*) AS n FROM orders GROUP BY ALL;
+
+query II
+SELECT comment, tags FROM duckdb_tables() WHERE table_name = 'summary';
+----
+per customer totals	{domain=sales}
+
+# CREATE OR REPLACE recomputes the metadata
+statement ok
+CREATE OR REPLACE TABLE order_facts AS SELECT id, amount AS amount COMMENT 'replaced' FROM orders;
+
+query III
+SELECT column_name, comment, tags FROM duckdb_columns() WHERE table_name = 'order_facts' ORDER BY column_index;
+----
+id	NULL	{}
+amount	replaced	{unit=USD}
+
+# INSERT INTO an existing table never changes its metadata
+statement ok
+INSERT INTO totals SELECT 'x' AS customer_email COMMENT 'ignored', 1 AS total TAGS {'k': 'v'};
+
+query III
+SELECT column_name, comment, tags FROM duckdb_columns() WHERE table_name = 'totals' ORDER BY column_index;
+----
+customer_email	NULL	{pii=email}
+total	NULL	{}
+
+# metadata flows through views and CTEs
+statement ok
+CREATE TEMP VIEW v AS SELECT customer_email AS email COMMENT 'from view', amount FROM orders;
+
+statement ok
+CREATE TABLE from_view AS WITH c AS (SELECT * FROM v) SELECT email, amount FROM c;
+
+query III
+SELECT column_name, comment, tags FROM duckdb_columns() WHERE table_name = 'from_view' ORDER BY column_index;
+----
+email	from view	{pii=email}
+amount	Order total including tax	{unit=USD}
+
+# a secure view hides the metadata declared inside it
+statement ok
+CREATE TEMP SECURE VIEW sv AS SELECT customer_email AS email COMMENT 'hidden' FROM orders;
+
+statement ok
+CREATE TABLE from_secure AS SELECT email FROM sv;
+
+query II
+SELECT comment, tags FROM duckdb_columns() WHERE table_name = 'from_secure';
+----
+NULL	{}
+
+# set operations take the annotations of the first branch only
+statement ok
+CREATE TABLE unioned AS SELECT amount AS a COMMENT 'first' FROM orders UNION ALL SELECT amount AS a COMMENT 'second' FROM orders;
+
+query II
+SELECT comment, tags FROM duckdb_columns() WHERE table_name = 'unioned';
+----
+first	{}
+
+statement error
+CREATE TABLE err (a COMMENT 'x' COMMENT 'y') AS SELECT 1;
+----
+COMMENT specified more than once for column a
+
+statement error
+CREATE TABLE err COMMENT 'x' COMMENT 'y' AS SELECT 1;
+----
+COMMENT specified more than once for the table
+
+# metadata survives a restart
+load {TEST_DIR}/create_table_as_annotations.db
+
+statement ok
+CREATE TABLE src (a INTEGER COMMENT 'src a' TAGS {'k': 'v'});
+
+statement ok
+CREATE TABLE dst COMMENT 'copy' AS SELECT a, a + 1 AS b COMMENT 'a plus one' FROM src;
+
+restart
+
+query III
+SELECT column_name, comment, tags FROM duckdb_columns() WHERE table_name = 'dst' ORDER BY column_index;
+----
+a	src a	{k=v}
+b	a plus one	{}
+
+query I
+SELECT comment FROM duckdb_tables() WHERE table_name = 'dst';
+----
+copy

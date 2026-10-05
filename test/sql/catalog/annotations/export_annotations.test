@@ -1,0 +1,39 @@
+# name: test/sql/catalog/annotations/export_annotations.test
+# description: EXPORT DATABASE and IMPORT DATABASE keep table and column comments and tags
+# group: [annotations]
+
+statement ok
+CREATE TABLE orders (id INTEGER COMMENT 'order id', email VARCHAR TAGS {'pii': 'email'}) COMMENT 'orders' TAGS {'domain': 'sales'};
+
+statement ok
+COMMENT ON COLUMN orders.id IS 'changed later';
+
+statement ok
+CREATE TABLE copied AS SELECT id, email, 1 AS one COMMENT 'constant' FROM orders;
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/export_annotations';
+
+statement ok
+DROP TABLE orders;
+
+statement ok
+DROP TABLE copied;
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/export_annotations';
+
+query IIII
+SELECT table_name, column_name, comment, tags FROM duckdb_columns() WHERE table_name IN ('orders', 'copied') ORDER BY table_name, column_index;
+----
+copied	id	changed later	{}
+copied	email	NULL	{pii=email}
+copied	one	constant	{}
+orders	id	changed later	{}
+orders	email	NULL	{pii=email}
+
+query III
+SELECT table_name, comment, tags FROM duckdb_tables() WHERE table_name IN ('orders', 'copied') ORDER BY table_name;
+----
+copied	NULL	{}
+orders	orders	{domain=sales}

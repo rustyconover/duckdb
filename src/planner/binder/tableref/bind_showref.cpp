@@ -225,6 +225,21 @@ static DescribedColumnInfo FindDescribedColumn(const DescribeTraceState &state, 
 	return FindDescribedColumn(state, op, bindings[column_index]);
 }
 
+vector<ColumnAnnotation> Binder::DescribeColumnAnnotations(LogicalOperator &plan) {
+	DescribeTraceState trace_state(*this);
+	CollectMaterializedCTEs(plan, trace_state);
+	vector<ColumnAnnotation> result;
+	auto bindings = plan.GetColumnBindings();
+	for (auto &binding : bindings) {
+		auto described = FindDescribedColumn(trace_state, plan, binding);
+		ColumnAnnotation annotation;
+		annotation.comment = std::move(described.comment);
+		annotation.tags = std::move(described.tags);
+		result.push_back(std::move(annotation));
+	}
+	return result;
+}
+
 BoundStatement Binder::BindDescribeQuery(ShowRef &ref) {
 	// bind the child plan of the DESCRIBE statement
 	auto child_binder = Binder::CreateBinder(context, this);
