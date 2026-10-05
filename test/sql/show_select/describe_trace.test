@@ -82,7 +82,7 @@ i	PRI
 
 # a recursive CTE referencing itself inside a DESCRIBE
 query I
-WITH RECURSIVE r AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM r, (DESCRIBE SELECT n FROM r) d WHERE n < 2) SELECT n FROM r ORDER BY n;
+WITH RECURSIVE r AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM r, (DESCRIBE SELECT n FROM r) d WHERE n < 2 AND d.column_name = 'n') SELECT n FROM r ORDER BY n;
 ----
 1
 2
