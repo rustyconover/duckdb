@@ -1,0 +1,126 @@
+# name: test/sql/copy/parquet/parquet_column_metadata.test
+# description: Column comments and tags are written to and read from Parquet key-value metadata
+# group: [parquet]
+
+require parquet
+
+statement ok
+CREATE TABLE orders (
+	id INTEGER,
+	email VARCHAR TAGS {'pii': 'email'},
+	amount DECIMAL(10, 2) COMMENT 'Order total' TAGS {'unit': 'USD'}
+);
+
+statement ok
+INSERT INTO orders VALUES (1, 'a@b.c', 12), (2, 'd@e.f', 24);
+
+statement ok
+COPY (SELECT id, email, amount, amount / 1.2 AS net COMMENT 'Before VAT', id + 1 AS computed FROM orders)
+TO '{TEST_DIR}/orders.parquet';
+
+query II
+SELECT decode(key), decode(value) FROM parquet_kv_metadata('{TEST_DIR}/orders.parquet');
+----
+duckdb:column_metadata	{"email":{"tags":{"pii":"email"}},"amount":{"comment":"Order total","tags":{"unit":"USD"}},"net":{"comment":"Before VAT"}}
+
+# reading the file describes its columns with them
+query II
+SELECT column_name, extra FROM (DESCRIBE FROM '{TEST_DIR}/orders.parquet');
+----
+id	NULL
+email	{"tags":{"pii":"email"}}
+amount	{"comment":"Order total","tags":{"unit":"USD"}}
+net	{"comment":"Before VAT"}
+computed	NULL
+
+# and CREATE TABLE AS stores them
+statement ok
+CREATE TABLE from_parquet AS SELECT email, net FROM '{TEST_DIR}/orders.parquet';
+
+query III
+SELECT column_name, comment, tags FROM duckdb_columns() WHERE table_name = 'from_parquet' ORDER BY column_index;
+----
+email	NULL	{pii=email}
+net	Before VAT	{}
+
+# copying a table writes the metadata of its columns
+statement ok
+COPY orders TO '{TEST_DIR}/table.parquet';
+
+query II
+SELECT column_name, extra FROM (DESCRIBE FROM read_parquet('{TEST_DIR}/table.parquet'));
+----
+id	NULL
+email	{"tags":{"pii":"email"}}
+amount	{"comment":"Order total","tags":{"unit":"USD"}}
+
+# COLUMN_METADATA false does not write them
+statement ok
+COPY orders TO '{TEST_DIR}/no_metadata.parquet' (COLUMN_METADATA false);
+
+query I
+SELECT count(*) FROM parquet_kv_metadata('{TEST_DIR}/no_metadata.parquet');
+----
+0
+
+query II
+SELECT column_name, extra FROM (DESCRIBE FROM '{TEST_DIR}/no_metadata.parquet');
+----
+id	NULL
+email	NULL
+amount	NULL
+
+# a value given through KV_METADATA takes precedence, and other keys are kept
+statement ok
+COPY orders TO '{TEST_DIR}/user_metadata.parquet' (KV_METADATA {'duckdb:column_metadata': '{"id": {"comment": "user"}}', 'other': 'x'});
+
+query II
+SELECT decode(key), decode(value) FROM parquet_kv_metadata('{TEST_DIR}/user_metadata.parquet') ORDER BY 1;
+----
+duckdb:column_metadata	{"id": {"comment": "user"}}
+other	x
+
+query II
+SELECT column_name, extra FROM (DESCRIBE FROM '{TEST_DIR}/user_metadata.parquet');
+----
+id	{"comment":"user"}
+email	NULL
+amount	NULL
+
+# malformed metadata is ignored
+statement ok
+COPY orders TO '{TEST_DIR}/malformed.parquet' (KV_METADATA {'duckdb:column_metadata': 'not json'});
+
+query II
+SELECT column_name, extra FROM (DESCRIBE FROM '{TEST_DIR}/malformed.parquet');
+----
+id	NULL
+email	NULL
+amount	NULL
+
+# no metadata is written when no column has a comment or tags
+statement ok
+COPY (SELECT 42 AS x) TO '{TEST_DIR}/plain.parquet';
+
+query I
+SELECT count(*) FROM parquet_kv_metadata('{TEST_DIR}/plain.parquet');
+----
+0
+
+# partitioned writes leave out the partition columns that are not written
+statement ok
+COPY (SELECT id, email, amount FROM orders) TO '{TEST_DIR}/partitioned' (FORMAT parquet, PARTITION_BY (id));
+
+query II
+SELECT column_name, extra FROM (DESCRIBE FROM read_parquet('{TEST_DIR}/partitioned/*/*.parquet', hive_partitioning = false));
+----
+email	{"tags":{"pii":"email"}}
+amount	{"comment":"Order total","tags":{"unit":"USD"}}
+
+# with hive partitioning, the partition column is described without metadata
+query II
+SELECT column_name, extra FROM (DESCRIBE FROM read_parquet('{TEST_DIR}/partitioned/*/*.parquet', hive_partitioning = true));
+----
+email	{"tags":{"pii":"email"}}
+amount	{"comment":"Order total","tags":{"unit":"USD"}}
+id	NULL

@@ -11,6 +11,7 @@
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/function/function.hpp"
 #include "duckdb/function/table_function.hpp"
+#include "duckdb/parser/column_annotation.hpp"
 #include "duckdb/parser/parsed_data/copy_info.hpp"
 #include "duckdb/parser/statement/copy_statement.hpp"
 #include "duckdb/common/enums/copy_option_mode.hpp"
@@ -95,6 +96,8 @@ struct CopyFunctionBindInput {
 	const CopyInfo &info;
 	shared_ptr<CopyFunctionInfo> function_info;
 	string file_extension;
+	//! The comment and tags of the columns to write, aligned with them
+	vector<ColumnAnnotation> column_annotations;
 };
 
 struct CopyFromFunctionBindInput {

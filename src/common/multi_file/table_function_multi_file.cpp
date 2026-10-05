@@ -563,6 +563,15 @@ void TableFunctionMultiFileWrapper::FinalizeBindData(MultiFileBindData &multi_fi
 	}
 }
 
+void TableFunctionMultiFileWrapper::GetBindInfo(const TableFunctionData &bind_data, BindInfo &info) {
+	auto &data = bind_data.Cast<TableFunctionMultiFileData>();
+	if (!function.get_bind_info || !data.options.schema_bind_data) {
+		return;
+	}
+	// the columns are described by the file that determined the schema
+	info.columns = function.get_bind_info(data.options.schema_bind_data.get()).columns;
+}
+
 //! Drop the per-file bind data of a scan whose schema the function combined itself - every file is re-bound against
 //! that combined schema, so what the files bound to on their own is of no use anymore
 void TableFunctionMultiFileWrapper::ReleaseBindData(const vector<shared_ptr<BaseUnionData>> &union_data) {

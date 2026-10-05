@@ -557,6 +557,16 @@ BoundStatement Binder::BindCopyTo(CopyStatement &stmt, const CopyFunction &funct
 	    unique_column_names, resolved_options.partition_cols, resolved_options.write_partition_columns);
 	auto types_to_write = LogicalCopyToFile::GetTypesWithoutPartitions(
 	    select_node.types, resolved_options.partition_cols, resolved_options.write_partition_columns);
+	// the comment and tags DESCRIBE reports for each written column
+	auto select_annotations = DescribeColumnAnnotations(*select_node.plan);
+	select_annotations.resize(unique_column_names.size());
+	for (auto &name : names_to_write) {
+		auto entry = std::find(unique_column_names.begin(), unique_column_names.end(), name);
+		bind_input.column_annotations.push_back(
+		    entry == unique_column_names.end()
+		        ? ColumnAnnotation()
+		        : select_annotations[NumericCast<idx_t>(entry - unique_column_names.begin())]);
+	}
 	auto function_data = function.copy_to_bind(context, bind_input, names_to_write, types_to_write);
 
 	unique_ptr<Expression> partition_path_expression;

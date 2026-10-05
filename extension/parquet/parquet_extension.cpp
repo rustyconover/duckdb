@@ -10,6 +10,7 @@
 
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "parquet_geometry.hpp"
+#include "parquet_column_metadata.hpp"
 #include "parquet_crypto.hpp"
 #include "parquet_metadata.hpp"
 #include "parquet_writer.hpp"
@@ -148,6 +149,7 @@ static void ParquetListCopyOptions(ClientContext &context, CopyOptionsInput &inp
 	copy_options["codec"] = CopyOption(LogicalType::VARCHAR, CopyOptionMode::READ_WRITE);
 	copy_options["field_ids"] = CopyOption(LogicalType::ANY, CopyOptionMode::WRITE_ONLY);
 	copy_options["kv_metadata"] = CopyOption(LogicalType::ANY, CopyOptionMode::WRITE_ONLY);
+	copy_options["column_metadata"] = CopyOption(LogicalType::BOOLEAN, CopyOptionMode::WRITE_ONLY);
 	copy_options["encryption_config"] = CopyOption(LogicalType::ANY, CopyOptionMode::READ_WRITE);
 	copy_options["dictionary_size_limit"] = CopyOption(LogicalType::BIGINT, CopyOptionMode::WRITE_ONLY);
 	copy_options["string_dictionary_page_size_limit"] = CopyOption(LogicalType::UBIGINT, CopyOptionMode::WRITE_ONLY);
@@ -178,6 +180,7 @@ static unique_ptr<FunctionData> ParquetWriteBind(ClientContext &context, CopyFun
                                                  const vector<LogicalType> &sql_types) {
 	D_ASSERT(names.size() == sql_types.size());
 	bool compression_level_set = false;
+	bool write_column_metadata = true;
 	auto bind_data = make_uniq<ParquetWriteBindData>();
 	for (auto &[option_name, option_values] : input.info.options) {
 		if (option_values.size() != 1) {
@@ -317,6 +320,8 @@ static unique_ptr<FunctionData> ParquetWriteBind(ClientContext &context, CopyFun
 				                      PrimitiveColumnWriter::MAX_UNCOMPRESSED_PAGE_SIZE);
 			}
 			bind_data->data_page_size_limit = val;
+		} else if (option_name == "column_metadata") {
+			write_column_metadata = BooleanValue::Get(option_values[0].DefaultCastAs(LogicalType::BOOLEAN));
 		} else if (option_name == "write_bloom_filter") {
 			bind_data->enable_bloom_filters = BooleanValue::Get(option_values[0].DefaultCastAs(LogicalType::BOOLEAN));
 		} else if (option_name == "bloom_filter_false_positive_ratio") {
@@ -373,6 +378,17 @@ static unique_ptr<FunctionData> ParquetWriteBind(ClientContext &context, CopyFun
 
 	bind_data->sql_types = sql_types;
 	bind_data->column_names = IdentifiersToStrings(names);
+
+	if (write_column_metadata && input.column_annotations.size() == names.size()) {
+		bool user_defined = false;
+		for (auto &kv : bind_data->kv_metadata) {
+			user_defined |= kv.first == ParquetColumnMetadata::KEY;
+		}
+		auto column_metadata = ParquetColumnMetadata::Write(bind_data->column_names, input.column_annotations);
+		if (!user_defined && !column_metadata.empty()) {
+			bind_data->kv_metadata.emplace_back(ParquetColumnMetadata::KEY, std::move(column_metadata));
+		}
+	}
 
 	return std::move(bind_data);
 }

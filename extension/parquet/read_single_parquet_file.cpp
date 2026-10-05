@@ -3,6 +3,8 @@
 #include "parquet_multi_file_info.hpp"
 #include "duckdb/common/enum_util.hpp"
 #include "parquet_reader.hpp"
+#include "parquet_column_metadata.hpp"
+#include "duckdb/parser/column_list.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
@@ -24,6 +26,8 @@ struct ReadSingleParquetFileData : public TableFunctionData {
 	optional_idx cardinality;
 	//! The expressions the reader evaluates on columns instead of reading them (e.g. their length for strlen)
 	unordered_map<idx_t, ParquetReaderProjectionExpression> projection_expressions;
+	//! The columns with the comment and tags stored in the key-value metadata of the file, if it has any
+	ColumnList described_columns;
 
 	//! Read the given column as the result of an expression on it - the column then has the type of that result
 	void AddProjectionExpression(idx_t column_idx, const ParquetReaderProjectionExpression &expression) {
@@ -89,6 +93,37 @@ struct ReadSingleParquetFileLocalState : public LocalTableFunctionState {
 	bool has_row_group = false;
 };
 
+//! Describes the columns of a file with the comment and tags stored in its key-value metadata
+static void ReadColumnMetadata(const duckdb_parquet::FileMetaData &metadata, const vector<Identifier> &names,
+                               const vector<LogicalType> &types, ColumnList &columns) {
+	unordered_map<string, ColumnAnnotation> annotations;
+	for (auto &kv : metadata.key_value_metadata) {
+		if (kv.key == ParquetColumnMetadata::KEY) {
+			annotations = ParquetColumnMetadata::Read(kv.value);
+		}
+	}
+	if (annotations.empty()) {
+		return;
+	}
+	for (idx_t i = 0; i < names.size(); i++) {
+		ColumnDefinition column(names[i], types[i]);
+		auto entry = annotations.find(names[i].GetIdentifierName());
+		if (entry != annotations.end()) {
+			entry->second.ApplyTo(column);
+		}
+		columns.AddColumn(std::move(column));
+	}
+}
+
+static BindInfo ReadSingleParquetFileGetBindInfo(const optional_ptr<FunctionData> bind_data_p) {
+	BindInfo info(ScanType::PARQUET);
+	auto &bind_data = bind_data_p->Cast<ReadSingleParquetFileData>();
+	if (bind_data.described_columns.LogicalColumnCount() > 0) {
+		info.columns = &bind_data.described_columns;
+	}
+	return info;
+}
+
 static unique_ptr<FunctionData> ReadSingleParquetFileBind(ClientContext &context, TableFunctionBindInput &input,
                                                           vector<LogicalType> &return_types,
                                                           vector<Identifier> &names) {
@@ -130,6 +165,7 @@ static unique_ptr<FunctionData> ReadSingleParquetFileBind(ClientContext &context
 	result->cardinality = reader->NumRows();
 	result->parquet_names = names;
 	result->parquet_types = return_types;
+	ReadColumnMetadata(*reader->GetFileMetadata(), names, return_types, result->described_columns);
 	if (file_input.expected_bind_data) {
 		// expressions pushed into the scan after the schema was bound are read from this file in the same way
 		auto &expected = file_input.expected_bind_data->Cast<ReadSingleParquetFileData>();
@@ -519,6 +555,7 @@ TableFunction ParquetScanFunction::GetSingleFileFunction() {
 	read_parquet.get_virtual_columns = ReadSingleParquetFileVirtualColumns;
 	read_parquet.get_partition_stats = ReadSingleParquetFilePartitionStats;
 	read_parquet.get_metrics = ReadSingleParquetFileGetMetrics;
+	read_parquet.get_bind_info = ReadSingleParquetFileGetBindInfo;
 	read_parquet.projection_pushdown = true;
 	read_parquet.late_materialization = true;
 	read_parquet.filter_pushdown = true;

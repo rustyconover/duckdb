@@ -411,6 +411,7 @@ public:
 	void CombineSchemas(ClientContext &context, const vector<shared_ptr<BaseUnionData>> &union_data, bool union_by_name,
 	                    vector<LogicalType> &return_types, vector<Identifier> &names) override;
 	void FinalizeBindData(MultiFileBindData &multi_file_data) override;
+	void GetBindInfo(const TableFunctionData &bind_data, BindInfo &info) override;
 	void GetVirtualColumns(ClientContext &context, MultiFileBindData &bind_data, virtual_column_map_t &result) override;
 	unique_ptr<GlobalTableFunctionState> InitializeGlobalState(ClientContext &context, MultiFileBindData &bind_data,
 	                                                           MultiFileGlobalState &global_state) override;
