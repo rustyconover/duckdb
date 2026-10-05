@@ -841,6 +841,15 @@ optional_ptr<CTEBinding> BindContext::GetCTEBinding(const BindingAlias &ctename)
 	return nullptr;
 }
 
+optional_ptr<CTEBinding> BindContext::GetCTEBinding(TableIndex index) {
+	for (auto &binding : cte_bindings) {
+		if (binding->GetIndex() == index) {
+			return binding.get();
+		}
+	}
+	return nullptr;
+}
+
 void BindContext::AddContext(BindContext other) {
 	for (auto &binding : other.bindings_list) {
 		AddBinding(std::move(binding));

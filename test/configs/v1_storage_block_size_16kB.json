@@ -42,6 +42,7 @@
       "reason": "CREATE SECURE VIEW requires v2.0.0 storage.",
       "paths": [
         "test/sql/catalog/view/secure_view.test",
+        "test/sql/catalog/view/describe_secure_view.test",
         "test/sql/optimizer/secure_view_explain.test",
         "test/sql/optimizer/secure_view_pushdown.test",
         "test/sql/optimizer/secure_view_statistics.test",
@@ -54,6 +55,12 @@
       "paths": [
         "test/sql/sql_export/empty_aggregate_state.test",
         "test/sql/sql_export/mark_condition_shapes.test"
+      ]
+    },
+    {
+      "reason": "COMMENT and TAGS in view and macro definitions require v2.0.0 storage.",
+      "paths": [
+        "test/sql/show_select/describe_select_annotations_storage.test"
       ]
     }
   ]

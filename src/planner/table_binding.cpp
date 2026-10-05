@@ -367,6 +367,7 @@ unique_ptr<ParsedExpression> DummyBinding::ParamToArg(ColumnRefExpression &colre
 	}
 	auto arg = (*arguments)[column_index]->Copy();
 	arg->SetAlias(colref.GetAlias());
+	arg->SetAnnotation(colref.GetAnnotation());
 	return arg;
 }
 
@@ -389,6 +390,14 @@ bool CTEBinding::IsReferenced() const {
 	return reference_count > 0;
 }
 
+optional_ptr<LogicalOperator> CTEBinding::GetBoundQuery() const {
+	auto state = finished_bind_state.lock();
+	if (!state) {
+		return nullptr;
+	}
+	return state->query.plan.get();
+}
+
 void CTEBinding::Reference() {
 	if (!CanBeReferenced()) {
 		throw InternalException("CTE cannot be referenced!");
@@ -403,6 +412,7 @@ void CTEBinding::Reference() {
 		Initialize();
 
 		// finalize binding
+		finished_bind_state = bind_state;
 		bind_state.reset();
 	}
 	reference_count++;

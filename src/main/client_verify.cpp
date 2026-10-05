@@ -40,7 +40,9 @@ void PreparedStatementVerification::ConvertConstants(unique_ptr<ParsedExpression
 	if (expr->GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
 		// constant: extract the constant value
 		auto alias = expr->GetAlias();
+		auto annotation = expr->GetAnnotation();
 		expr->ClearAlias();
+		expr->SetAnnotation(nullptr);
 		// check if the value already exists
 		idx_t index = values.size();
 		auto identifier = Identifier(std::to_string(index + 1));
@@ -59,6 +61,7 @@ void PreparedStatementVerification::ConvertConstants(unique_ptr<ParsedExpression
 		auto parameter = make_uniq<ParameterExpression>();
 		parameter->IdentifierMutable() = identifier;
 		parameter->SetAlias(alias);
+		parameter->SetAnnotation(annotation);
 		expr = std::move(parameter);
 		return;
 	}

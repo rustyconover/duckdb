@@ -1,4 +1,5 @@
 #include "duckdb/parser/query_node/select_node.hpp"
+#include "duckdb/parser/column_annotation.hpp"
 #include "duckdb/parser/expression_util.hpp"
 #include "duckdb/common/serializer/serializer.hpp"
 
@@ -38,9 +39,16 @@ string SelectNode::ToString() const {
 		if (i > 0) {
 			result += ", ";
 		}
-		result += select_list[i]->ToString();
-		if (!select_list[i]->GetAlias().empty()) {
-			result += StringUtil::Format(" AS %s", SQLIdentifier(select_list[i]->GetAlias()));
+		auto &entry = *select_list[i];
+		result += entry.ToString();
+		if (!entry.GetAlias().empty()) {
+			result += StringUtil::Format(" AS %s", SQLIdentifier(entry.GetAlias()));
+		} else if (entry.GetAnnotation()) {
+			// COMMENT and TAGS require an alias
+			result += StringUtil::Format(" AS %s", SQLIdentifier(entry.GetName()));
+		}
+		if (entry.GetAnnotation()) {
+			result += entry.GetAnnotation()->ToString();
 		}
 	}
 	if (from_table && from_table->type != TableReferenceType::EMPTY_FROM) {

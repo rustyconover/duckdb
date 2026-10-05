@@ -192,6 +192,21 @@ BoundStatement Binder::Bind(TableRef &ref) {
 	return result;
 }
 
+optional_ptr<LogicalOperator> Binder::GetBoundCTEQuery(TableIndex cte_index) {
+	reference<Binder> current_binder(*this);
+	while (true) {
+		auto &current = current_binder.get();
+		auto entry = current.bind_context.GetCTEBinding(cte_index);
+		if (entry) {
+			return entry->GetBoundQuery();
+		}
+		if (!current.parent || current.binder_type != BinderType::REGULAR_BINDER) {
+			return nullptr;
+		}
+		current_binder = *current.parent;
+	}
+}
+
 optional_ptr<CTEBinding> Binder::GetCTEBinding(const BindingAlias &name) {
 	reference<Binder> current_binder(*this);
 	optional_ptr<CTEBinding> result;
@@ -229,6 +244,26 @@ void Binder::AddBoundView(ViewCatalogEntry &view) {
 
 TableIndex Binder::GenerateTableIndex() {
 	return TableIndex(global_binder_state->bound_tables++);
+}
+
+void Binder::RegisterColumnAnnotation(ColumnBinding binding, shared_ptr<const ColumnAnnotation> annotation) {
+	global_binder_state->column_annotations[binding] = std::move(annotation);
+}
+
+void Binder::CopyColumnAnnotation(ColumnBinding source, ColumnBinding target) {
+	auto &annotations = global_binder_state->column_annotations;
+	auto entry = annotations.find(source);
+	if (entry != annotations.end()) {
+		annotations[target] = entry->second;
+	}
+}
+
+optional_ptr<const ColumnAnnotation> Binder::GetColumnAnnotation(ColumnBinding binding) const {
+	auto entry = global_binder_state->column_annotations.find(binding);
+	if (entry == global_binder_state->column_annotations.end()) {
+		return nullptr;
+	}
+	return entry->second.get();
 }
 
 StatementProperties &Binder::GetStatementProperties() {

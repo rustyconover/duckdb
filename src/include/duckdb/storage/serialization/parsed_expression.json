@@ -6,7 +6,8 @@
       "type"
     ],
     "includes": [
-      "duckdb/parser/expression/list.hpp"
+      "duckdb/parser/expression/list.hpp",
+      "duckdb/parser/column_annotation.hpp"
     ],
     "functions": [
       "Equals",
@@ -45,6 +46,14 @@
         "type": "uint32_t",
         "property": "query_location.length",
         "default": "0",
+        "version": "v2.0.0",
+        "equals_skip": true,
+        "hash_skip": true
+      },
+      {
+        "id": 105,
+        "name": "annotation",
+        "type": "shared_ptr<const ColumnAnnotation>",
         "version": "v2.0.0",
         "equals_skip": true,
         "hash_skip": true

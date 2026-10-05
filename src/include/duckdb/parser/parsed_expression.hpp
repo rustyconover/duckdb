@@ -11,6 +11,7 @@
 #include "duckdb/parser/base_expression.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/parser/qualified_name.hpp"
+#include "duckdb/common/shared_ptr.hpp"
 
 namespace duckdb {
 class Deserializer;
@@ -159,6 +160,8 @@ private:
 	vector<unique_ptr<ParsedExpression> *> overflow;
 };
 
+struct ColumnAnnotation;
+
 //!  The ParsedExpression class is a base class that can represent any expression
 //!  part of a SQL statement.
 /*!
@@ -202,6 +205,18 @@ public:
 	static bool Equals(const unique_ptr<ParsedExpression> &left, const unique_ptr<ParsedExpression> &right);
 	static bool ListEquals(const vector<unique_ptr<ParsedExpression>> &left,
 	                       const vector<unique_ptr<ParsedExpression>> &right);
+
+	//! Returns the COMMENT and TAGS declared for this select-list entry, or nullptr
+	const shared_ptr<const ColumnAnnotation> &GetAnnotation() const {
+		return annotation;
+	}
+	void SetAnnotation(shared_ptr<const ColumnAnnotation> annotation_p) {
+		annotation = std::move(annotation_p);
+	}
+
+protected:
+	//! The COMMENT and TAGS declared for this select-list entry
+	shared_ptr<const ColumnAnnotation> annotation;
 };
 
 } // namespace duckdb
