@@ -1,3 +1,4 @@
+#include "duckdb/common/sql_identifier.hpp"
 #include "duckdb/parser/constraints/unique_constraint.hpp"
 #include "duckdb/parser/peg/ast/add_column_entry.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
@@ -271,6 +272,9 @@ unique_ptr<AlterTableInfo> PEGTransformerFactory::TransformAddColumn(PEGTransfor
 		column_definition.SetDefaultValue(std::move(add_column_entry.default_value));
 	}
 	column_definition.SetCompressionType(add_column_entry.compression_type);
+	if (add_column_entry.annotation) {
+		add_column_entry.annotation->ApplyTo(column_definition);
+	}
 
 	unique_ptr<AlterTableInfo> result;
 	auto if_not_exists_value = if_not_exists.has_value();
@@ -287,6 +291,9 @@ unique_ptr<AlterTableInfo> PEGTransformerFactory::TransformAddColumn(PEGTransfor
 		}
 		if (add_column_entry.compression_type != CompressionType::COMPRESSION_AUTO) {
 			throw NotImplementedException("Adding compression to nested fields is not supported");
+		}
+		if (add_column_entry.annotation) {
+			throw NotImplementedException("Adding COMMENT or TAGS to nested fields is not supported");
 		}
 		const auto parent_path =
 		    vector<Identifier>(add_column_entry.column_path.begin(), add_column_entry.column_path.end() - 1);
@@ -313,6 +320,7 @@ AddColumnEntry PEGTransformerFactory::TransformAddColumnEntry(
 	if (type) {
 		new_column.type = *type;
 	}
+	vector<ColumnAnnotationClause> annotation_clauses;
 	if (column_constraint) {
 		for (auto &constraint : *column_constraint) {
 			auto constraint_type =
@@ -339,8 +347,14 @@ AddColumnEntry PEGTransformerFactory::TransformAddColumnEntry(
 				}
 			} else if (constraint.constraint_name == "ColumnCollation") {
 				new_column.type = ApplyColumnCollation(new_column.type, std::move(constraint.expression));
+			} else if (constraint.constraint_name == "ColumnAnnotation") {
+				annotation_clauses.push_back(std::move(constraint.annotation));
 			}
 		}
+	}
+	if (!annotation_clauses.empty()) {
+		auto column_name = "column " + SQLIdentifier::ToString(new_column.column_path.back());
+		new_column.annotation = CombineAnnotationClauses(std::move(annotation_clauses), column_name);
 	}
 	return new_column;
 }

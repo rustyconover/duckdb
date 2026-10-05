@@ -1275,6 +1275,7 @@ ColumnConstraintEntry:
     - ForeignKeyConstraint
     - ColumnCollation
     - ColumnCompression
+    - ColumnAnnotationConstraint
 
 AnalyzeTarget:
   type: "AnalyzeTarget"
@@ -1658,8 +1659,11 @@ overrides:
   GeneratedColumn:
     type: "GeneratedColumnDefinition"
     by_value: true
-  IdentifierList:
+  CreateTableAsColumnList:
     type: "ColumnList"
+    by_value: true
+  CreateTableAsColumn:
+    type: "ColumnDefinition"
     by_value: true
   # expression.gram
   NotExpression:
@@ -1734,12 +1738,6 @@ overrides:
     default_initializer: "INNER"
   SampleProperties: "pair<SampleMethod, optional_idx>"
   SampleFunction: "SampleMethod"
-  ColumnTagEntry:
-    type: "pair<string, string>"
-    by_value: true
-  ColumnTagList:
-    type: "vector<pair<string, string>>"
-    by_value: true
   # select.gram (ordering)
   DescOrAsc:
     type: "OrderType"

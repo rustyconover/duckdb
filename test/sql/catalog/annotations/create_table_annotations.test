@@ -1,0 +1,147 @@
+# name: test/sql/catalog/annotations/create_table_annotations.test
+# description: COMMENT and TAGS in CREATE TABLE column definitions, at table level and in ALTER TABLE ADD COLUMN
+# group: [annotations]
+
+statement ok
+CREATE TABLE orders (
+	id INTEGER PRIMARY KEY,
+	customer_email VARCHAR TAGS {'pii': 'email'},
+	amount DECIMAL(10, 2) NOT NULL COMMENT 'Order total including tax' TAGS {'unit': 'USD'},
+	note VARCHAR DEFAULT 'none' TAGS {'k': 'v'} COMMENT 'free text'
+) COMMENT 'One row per order' TAGS {'domain': 'sales'};
+
+query IIII
+SELECT column_name, comment, tags, is_nullable FROM duckdb_columns() WHERE table_name = 'orders' ORDER BY column_index;
+----
+id	NULL	{}	false
+customer_email	NULL	{pii=email}	true
+amount	Order total including tax	{unit=USD}	false
+note	free text	{k=v}	true
+
+query II
+SELECT comment, tags FROM duckdb_tables() WHERE table_name = 'orders';
+----
+One row per order	{domain=sales}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE orders);
+----
+id	NULL
+customer_email	{"tags":{"pii":"email"}}
+amount	{"comment":"Order total including tax","tags":{"unit":"USD"}}
+note	{"comment":"free text","tags":{"k":"v"}}
+
+# the table's SQL includes its comments and tags
+query I
+SELECT sql FROM duckdb_tables() WHERE table_name = 'orders';
+----
+CREATE TABLE orders(id INTEGER PRIMARY KEY, customer_email VARCHAR TAGS {'pii': 'email'}, amount DECIMAL(10,2) NOT NULL COMMENT 'Order total including tax' TAGS {'unit': 'USD'}, note VARCHAR DEFAULT('none') COMMENT 'free text' TAGS {'k': 'v'}) COMMENT 'One row per order' TAGS {'domain': 'sales'};
+
+# the default and constraints still apply
+statement ok
+INSERT INTO orders (id, customer_email, amount) VALUES (1, 'a@b.c', 10);
+
+query IIII
+FROM orders;
+----
+1	a@b.c	10.00	none
+
+statement error
+INSERT INTO orders VALUES (2, 'x', NULL, NULL);
+----
+NOT NULL constraint failed
+
+# ALTER TABLE ADD COLUMN
+statement ok
+ALTER TABLE orders ADD COLUMN currency VARCHAR COMMENT 'ISO 4217 code' TAGS {'standard': 'iso4217'};
+
+statement ok
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS region VARCHAR DEFAULT 'eu' COMMENT 'sales region';
+
+query III
+SELECT column_name, comment, tags FROM duckdb_columns() WHERE table_name = 'orders' AND column_index > 4 ORDER BY column_index;
+----
+currency	ISO 4217 code	{standard=iso4217}
+region	sales region	{}
+
+query II
+SELECT currency, region FROM orders;
+----
+NULL	eu
+
+# COMMENT ON and TAG ON still change them afterwards
+statement ok
+COMMENT ON COLUMN orders.currency IS 'currency code';
+
+statement ok
+TAG ON COLUMN orders.currency SET {'k': 'v'};
+
+query II
+SELECT comment, tags FROM duckdb_columns() WHERE table_name = 'orders' AND column_name = 'currency';
+----
+currency code	{standard=iso4217, k=v}
+
+# generated columns
+statement ok
+CREATE TABLE gen (a INTEGER, b INTEGER GENERATED ALWAYS AS (a * 2) COMMENT 'twice a' TAGS {'derived': 'true'});
+
+query III
+SELECT column_name, comment, tags FROM duckdb_columns() WHERE table_name = 'gen' ORDER BY column_index;
+----
+a	NULL	{}
+b	twice a	{derived=true}
+
+# comment and tags are column names and aliases as before
+statement ok
+CREATE TABLE plain (comment VARCHAR, tags VARCHAR COMMENT 'tags column');
+
+query II
+SELECT column_name, comment FROM duckdb_columns() WHERE table_name = 'plain' ORDER BY column_index;
+----
+comment	NULL
+tags	tags column
+
+# errors
+statement error
+CREATE TABLE err (a INTEGER COMMENT 'x' COMMENT 'y');
+----
+COMMENT specified more than once for column a
+
+statement error
+CREATE TABLE err (a INTEGER TAGS {'k': 'v'} TAGS {'j': 'w'});
+----
+TAGS specified more than once for column a
+
+statement error
+CREATE TABLE err (a INTEGER TAGS {'k': 'v', 'K': 'w'});
+----
+Tag 'K' should be specified at most once for column a
+
+statement error
+CREATE TABLE err (a INTEGER) COMMENT 'x' COMMENT 'y';
+----
+COMMENT specified more than once for the table
+
+statement error
+CREATE TABLE err (a INTEGER TAGS {});
+----
+syntax error
+
+statement error
+CREATE TABLE err (a INTEGER COMMENT 42);
+----
+syntax error
+
+statement error
+ALTER TABLE orders ADD COLUMN c INTEGER COMMENT 'x' COMMENT 'y';
+----
+COMMENT specified more than once for column c
+
+# temporary tables
+statement ok
+CREATE TEMP TABLE tmp (a INTEGER COMMENT 'temp column') COMMENT 'temp table';
+
+query II
+SELECT t.comment, c.comment FROM duckdb_tables() t JOIN duckdb_columns() c USING (table_oid) WHERE t.table_name = 'tmp';
+----
+temp table	temp column

@@ -823,9 +823,12 @@ static const TransformFrameOps WITH_DATA_ONLY_OPS = {"WithDataOnly",
                                                      &PEGTransformerFactory::FinalizeWithDataOnlyTrampoline};
 static const TransformFrameOps WITH_NO_DATA_OPS = {"WithNoData", &PEGTransformerFactory::InitializeWithNoDataTrampoline,
                                                    &PEGTransformerFactory::FinalizeWithNoDataTrampoline};
-static const TransformFrameOps IDENTIFIER_LIST_OPS = {"IdentifierList",
-                                                      &PEGTransformerFactory::InitializeIdentifierListTrampoline,
-                                                      &PEGTransformerFactory::FinalizeIdentifierListTrampoline};
+static const TransformFrameOps CREATE_TABLE_AS_COLUMN_LIST_OPS = {
+    "CreateTableAsColumnList", &PEGTransformerFactory::InitializeCreateTableAsColumnListTrampoline,
+    &PEGTransformerFactory::FinalizeCreateTableAsColumnListTrampoline};
+static const TransformFrameOps CREATE_TABLE_AS_COLUMN_OPS = {
+    "CreateTableAsColumn", &PEGTransformerFactory::InitializeCreateTableAsColumnTrampoline,
+    &PEGTransformerFactory::FinalizeCreateTableAsColumnTrampoline};
 static const TransformFrameOps CREATE_COLUMN_LIST_OPS = {"CreateColumnList",
                                                          &PEGTransformerFactory::InitializeCreateColumnListTrampoline,
                                                          &PEGTransformerFactory::FinalizeCreateColumnListTrampoline};
@@ -911,6 +914,9 @@ static const TransformFrameOps COLUMN_COLLATION_OPS = {"ColumnCollation",
 static const TransformFrameOps COLUMN_COMPRESSION_OPS = {"ColumnCompression",
                                                          &PEGTransformerFactory::InitializeColumnCompressionTrampoline,
                                                          &PEGTransformerFactory::FinalizeColumnCompressionTrampoline};
+static const TransformFrameOps COLUMN_ANNOTATION_CONSTRAINT_OPS = {
+    "ColumnAnnotationConstraint", &PEGTransformerFactory::InitializeColumnAnnotationConstraintTrampoline,
+    &PEGTransformerFactory::FinalizeColumnAnnotationConstraintTrampoline};
 static const TransformFrameOps KEY_ACTIONS_OPS = {"KeyActions", &PEGTransformerFactory::InitializeKeyActionsTrampoline,
                                                   &PEGTransformerFactory::FinalizeKeyActionsTrampoline};
 static const TransformFrameOps UPDATE_FIRST_KEY_ACTIONS_OPS = {
@@ -2901,12 +2907,6 @@ static const TransformFrameOps COLUMN_COMMENT_ANNOTATION_OPS = {
 static const TransformFrameOps COLUMN_TAGS_ANNOTATION_OPS = {
     "ColumnTagsAnnotation", &PEGTransformerFactory::InitializeColumnTagsAnnotationTrampoline,
     &PEGTransformerFactory::FinalizeColumnTagsAnnotationTrampoline};
-static const TransformFrameOps COLUMN_TAG_LIST_OPS = {"ColumnTagList",
-                                                      &PEGTransformerFactory::InitializeColumnTagListTrampoline,
-                                                      &PEGTransformerFactory::FinalizeColumnTagListTrampoline};
-static const TransformFrameOps COLUMN_TAG_ENTRY_OPS = {"ColumnTagEntry",
-                                                       &PEGTransformerFactory::InitializeColumnTagEntryTrampoline,
-                                                       &PEGTransformerFactory::FinalizeColumnTagEntryTrampoline};
 static const TransformFrameOps VALUES_CLAUSE_OPS = {"ValuesClause",
                                                     &PEGTransformerFactory::InitializeValuesClauseTrampoline,
                                                     &PEGTransformerFactory::FinalizeValuesClauseTrampoline};
@@ -3388,7 +3388,8 @@ const case_insensitive_map_t<const TransformFrameOps *> &PEGTransformerFactory::
 	    {"WithData", &WITH_DATA_OPS},
 	    {"WithDataOnly", &WITH_DATA_ONLY_OPS},
 	    {"WithNoData", &WITH_NO_DATA_OPS},
-	    {"IdentifierList", &IDENTIFIER_LIST_OPS},
+	    {"CreateTableAsColumnList", &CREATE_TABLE_AS_COLUMN_LIST_OPS},
+	    {"CreateTableAsColumn", &CREATE_TABLE_AS_COLUMN_OPS},
 	    {"CreateColumnList", &CREATE_COLUMN_LIST_OPS},
 	    {"IfNotExists", &IF_NOT_EXISTS_OPS},
 	    {"QualifiedName", &QUALIFIED_NAME_OPS},
@@ -3417,6 +3418,7 @@ const case_insensitive_map_t<const TransformFrameOps *> &PEGTransformerFactory::
 	    {"ForeignKeyConstraint", &FOREIGN_KEY_CONSTRAINT_OPS},
 	    {"ColumnCollation", &COLUMN_COLLATION_OPS},
 	    {"ColumnCompression", &COLUMN_COMPRESSION_OPS},
+	    {"ColumnAnnotationConstraint", &COLUMN_ANNOTATION_CONSTRAINT_OPS},
 	    {"KeyActions", &KEY_ACTIONS_OPS},
 	    {"UpdateFirstKeyActions", &UPDATE_FIRST_KEY_ACTIONS_OPS},
 	    {"DeleteFirstKeyActions", &DELETE_FIRST_KEY_ACTIONS_OPS},
@@ -4112,8 +4114,6 @@ const case_insensitive_map_t<const TransformFrameOps *> &PEGTransformerFactory::
 	    {"ColumnAnnotation", &COLUMN_ANNOTATION_OPS},
 	    {"ColumnCommentAnnotation", &COLUMN_COMMENT_ANNOTATION_OPS},
 	    {"ColumnTagsAnnotation", &COLUMN_TAGS_ANNOTATION_OPS},
-	    {"ColumnTagList", &COLUMN_TAG_LIST_OPS},
-	    {"ColumnTagEntry", &COLUMN_TAG_ENTRY_OPS},
 	    {"ValuesClause", &VALUES_CLAUSE_OPS},
 	    {"ValuesExpressions", &VALUES_EXPRESSIONS_OPS},
 	    {"SetStatement", &SET_STATEMENT_OPS},
@@ -9431,12 +9431,33 @@ PEGTransformerFactory::FinalizeCreateTableDefinitionTrampoline(PEGTransformer &t
 void PEGTransformerFactory::InitializeCreateTableAsTrampoline(PEGTransformer &transformer,
                                                               GeneratedTransformProcess &process) {
 	auto &list_pr = process.parse_result.Cast<ListParseResult>();
-	process.ReserveChildSlots(5);
-	auto &with_data_opt = list_pr.GetChild(5).Cast<OptionalParseResult>();
-	if (with_data_opt.HasResult()) {
-		process.PushChild({transformer.GetRule("WithData"), with_data_opt.GetResult()}, 4);
+	auto &repeat_opt = list_pr.GetChild(3).Cast<OptionalParseResult>();
+	idx_t dynamic_child_count = 0;
+	if (repeat_opt.HasResult()) {
+		auto &repeat_pr = repeat_opt.GetResult().Cast<RepeatParseResult>();
+		auto repeat_children = repeat_pr.GetChildren();
+		dynamic_child_count = repeat_children.size();
+		process.ReserveChildSlots(6 + dynamic_child_count - 1);
+		auto &with_data_opt = list_pr.GetChild(6).Cast<OptionalParseResult>();
+		if (with_data_opt.HasResult()) {
+			process.PushChild({transformer.GetRule("WithData"), with_data_opt.GetResult()},
+			                  5 + dynamic_child_count - 1);
+		}
+		process.PushChild({transformer.GetRule("Statement"), list_pr.GetChild(5)}, 4 + dynamic_child_count - 1);
+		for (idx_t i = repeat_children.size(); i > 0; i--) {
+			auto child_idx = i - 1;
+			process.PushChild({transformer.GetRule("ColumnAnnotation"), repeat_children[child_idx].get()},
+			                  3 + child_idx);
+		}
+	} else {
+		process.ReserveChildSlots(6 - 1);
+		auto &with_data_opt = list_pr.GetChild(6).Cast<OptionalParseResult>();
+		if (with_data_opt.HasResult()) {
+			process.PushChild({transformer.GetRule("WithData"), with_data_opt.GetResult()},
+			                  5 + dynamic_child_count - 1);
+		}
+		process.PushChild({transformer.GetRule("Statement"), list_pr.GetChild(5)}, 4 + dynamic_child_count - 1);
 	}
-	process.PushChild({transformer.GetRule("Statement"), list_pr.GetChild(4)}, 3);
 	auto &with_list_opt = list_pr.GetChild(2).Cast<OptionalParseResult>();
 	if (with_list_opt.HasResult()) {
 		process.PushChild({transformer.GetRule("WithList"), with_list_opt.GetResult()}, 2);
@@ -9445,18 +9466,27 @@ void PEGTransformerFactory::InitializeCreateTableAsTrampoline(PEGTransformer &tr
 	if (partition_sorted_options_opt.HasResult()) {
 		process.PushChild({transformer.GetRule("PartitionSortedOptions"), partition_sorted_options_opt.GetResult()}, 1);
 	}
-	auto &identifier_list_opt = list_pr.GetChild(0).Cast<OptionalParseResult>();
-	if (identifier_list_opt.HasResult()) {
-		process.PushChild({transformer.GetRule("IdentifierList"), identifier_list_opt.GetResult()}, 0);
+	auto &create_table_as_column_list_opt = list_pr.GetChild(0).Cast<OptionalParseResult>();
+	if (create_table_as_column_list_opt.HasResult()) {
+		process.PushChild({transformer.GetRule("CreateTableAsColumnList"), create_table_as_column_list_opt.GetResult()},
+		                  0);
 	}
 }
 
 unique_ptr<TransformResultValue>
 PEGTransformerFactory::FinalizeCreateTableAsTrampoline(PEGTransformer &transformer,
                                                        GeneratedTransformProcess &process) {
-	optional<ColumnList> identifier_list {};
+	auto &list_pr = process.parse_result.Cast<ListParseResult>();
+	idx_t dynamic_child_count = 0;
+	auto &dynamic_repeat_opt = list_pr.GetChild(3).Cast<OptionalParseResult>();
+	if (dynamic_repeat_opt.HasResult()) {
+		auto &dynamic_repeat_pr = dynamic_repeat_opt.GetResult().Cast<RepeatParseResult>();
+		auto dynamic_repeat_children = dynamic_repeat_pr.GetChildren();
+		dynamic_child_count = dynamic_repeat_children.size();
+	}
+	optional<ColumnList> create_table_as_column_list {};
 	if (process.child_results[0]) {
-		identifier_list = process.TakeResult<ColumnList>(0);
+		create_table_as_column_list = process.TakeResult<ColumnList>(0);
 	}
 	optional<PartitionSortedOptions> partition_sorted_options {};
 	if (process.child_results[1]) {
@@ -9466,13 +9496,22 @@ PEGTransformerFactory::FinalizeCreateTableAsTrampoline(PEGTransformer &transform
 	if (process.child_results[2]) {
 		with_list = process.TakeResult<case_insensitive_map_t<unique_ptr<ParsedExpression>>>(2);
 	}
-	auto statement = process.TakeResult<unique_ptr<SQLStatement>>(3);
-	optional<bool> with_data {};
-	if (process.child_results[4]) {
-		with_data = process.TakeResult<bool>(4);
+	optional<vector<ColumnAnnotationClause>> column_annotation {};
+	if (dynamic_child_count > 0) {
+		vector<ColumnAnnotationClause> column_annotation_value;
+		for (idx_t i = 3; i < 3 + dynamic_child_count; i++) {
+			column_annotation_value.push_back(process.TakeResult<ColumnAnnotationClause>(i));
+		}
+		column_annotation = std::move(column_annotation_value);
 	}
-	auto result = TransformCreateTableAs(transformer, std::move(identifier_list), std::move(partition_sorted_options),
-	                                     std::move(with_list), std::move(statement), with_data);
+	auto statement = process.TakeResult<unique_ptr<SQLStatement>>(4 + dynamic_child_count - 1);
+	optional<bool> with_data {};
+	if (process.child_results[5 + dynamic_child_count - 1]) {
+		with_data = process.TakeResult<bool>(5 + dynamic_child_count - 1);
+	}
+	auto result =
+	    TransformCreateTableAs(transformer, std::move(create_table_as_column_list), std::move(partition_sorted_options),
+	                           std::move(with_list), std::move(column_annotation), std::move(statement), with_data);
 	return make_uniq<TypedTransformResult<CreateTableDefinition>>(std::move(result));
 }
 
@@ -9639,28 +9678,94 @@ PEGTransformerFactory::FinalizeWithNoDataTrampoline(PEGTransformer &transformer,
 	return make_uniq<TypedTransformResult<bool>>(result);
 }
 
-void PEGTransformerFactory::InitializeIdentifierListTrampoline(PEGTransformer &transformer,
-                                                               GeneratedTransformProcess &process) {
-	process.ReserveChildSlots(0);
+void PEGTransformerFactory::InitializeCreateTableAsColumnListTrampoline(PEGTransformer &transformer,
+                                                                        GeneratedTransformProcess &process) {
+	auto &list_pr = process.parse_result.Cast<ListParseResult>();
+	auto list_items = ExtractParseResultsFromList(ExtractResultFromParens(list_pr.GetChild(0)));
+	auto dynamic_child_count = list_items.size();
+	process.ReserveChildSlots(1 + dynamic_child_count - 1);
+	for (idx_t i = list_items.size(); i > 0; i--) {
+		auto child_idx = i - 1;
+		process.PushChild({transformer.GetRule("CreateTableAsColumn"), list_items[child_idx].get()}, 0 + child_idx);
+	}
 }
 
 unique_ptr<TransformResultValue>
-PEGTransformerFactory::FinalizeIdentifierListTrampoline(PEGTransformer &transformer,
-                                                        GeneratedTransformProcess &process) {
+PEGTransformerFactory::FinalizeCreateTableAsColumnListTrampoline(PEGTransformer &transformer,
+                                                                 GeneratedTransformProcess &process) {
 	auto &list_pr = process.parse_result.Cast<ListParseResult>();
-	vector<Identifier> identifier;
-	auto identifier_items = ExtractParseResultsFromList(ExtractResultFromParens(list_pr.GetChild(0)));
-	for (auto &identifier_item : identifier_items) {
-		identifier.push_back(identifier_item.get().Cast<IdentifierParseResult>().identifier);
+	auto dynamic_list_items = ExtractParseResultsFromList(ExtractResultFromParens(list_pr.GetChild(0)));
+	auto dynamic_child_count = dynamic_list_items.size();
+	vector<ColumnDefinition> create_table_as_column;
+	for (idx_t i = 0; i < 0 + dynamic_child_count; i++) {
+		create_table_as_column.push_back(process.TakeResult<ColumnDefinition>(i));
 	}
-	auto result = TransformIdentifierList(transformer, identifier);
+	auto result = TransformCreateTableAsColumnList(transformer, std::move(create_table_as_column));
 	return make_uniq<TypedTransformResult<ColumnList>>(std::move(result));
+}
+
+void PEGTransformerFactory::InitializeCreateTableAsColumnTrampoline(PEGTransformer &transformer,
+                                                                    GeneratedTransformProcess &process) {
+	auto &list_pr = process.parse_result.Cast<ListParseResult>();
+	auto &repeat_opt = list_pr.GetChild(1).Cast<OptionalParseResult>();
+	idx_t dynamic_child_count = 0;
+	if (repeat_opt.HasResult()) {
+		auto &repeat_pr = repeat_opt.GetResult().Cast<RepeatParseResult>();
+		auto repeat_children = repeat_pr.GetChildren();
+		dynamic_child_count = repeat_children.size();
+		process.ReserveChildSlots(1 + dynamic_child_count - 1);
+		for (idx_t i = repeat_children.size(); i > 0; i--) {
+			auto child_idx = i - 1;
+			process.PushChild({transformer.GetRule("ColumnAnnotation"), repeat_children[child_idx].get()},
+			                  0 + child_idx);
+		}
+	} else {
+		process.ReserveChildSlots(1 - 1);
+	}
+}
+
+unique_ptr<TransformResultValue>
+PEGTransformerFactory::FinalizeCreateTableAsColumnTrampoline(PEGTransformer &transformer,
+                                                             GeneratedTransformProcess &process) {
+	auto &list_pr = process.parse_result.Cast<ListParseResult>();
+	idx_t dynamic_child_count = 0;
+	auto &dynamic_repeat_opt = list_pr.GetChild(1).Cast<OptionalParseResult>();
+	if (dynamic_repeat_opt.HasResult()) {
+		auto &dynamic_repeat_pr = dynamic_repeat_opt.GetResult().Cast<RepeatParseResult>();
+		auto dynamic_repeat_children = dynamic_repeat_pr.GetChildren();
+		dynamic_child_count = dynamic_repeat_children.size();
+	}
+	auto identifier = list_pr.GetChild(0).Cast<IdentifierParseResult>().identifier;
+	optional<vector<ColumnAnnotationClause>> column_annotation {};
+	if (dynamic_child_count > 0) {
+		vector<ColumnAnnotationClause> column_annotation_value;
+		for (idx_t i = 0; i < 0 + dynamic_child_count; i++) {
+			column_annotation_value.push_back(process.TakeResult<ColumnAnnotationClause>(i));
+		}
+		column_annotation = std::move(column_annotation_value);
+	}
+	auto result = TransformCreateTableAsColumn(transformer, identifier, std::move(column_annotation));
+	return make_uniq<TypedTransformResult<ColumnDefinition>>(std::move(result));
 }
 
 void PEGTransformerFactory::InitializeCreateColumnListTrampoline(PEGTransformer &transformer,
                                                                  GeneratedTransformProcess &process) {
 	auto &list_pr = process.parse_result.Cast<ListParseResult>();
-	process.ReserveChildSlots(3);
+	auto &repeat_opt = list_pr.GetChild(3).Cast<OptionalParseResult>();
+	idx_t dynamic_child_count = 0;
+	if (repeat_opt.HasResult()) {
+		auto &repeat_pr = repeat_opt.GetResult().Cast<RepeatParseResult>();
+		auto repeat_children = repeat_pr.GetChildren();
+		dynamic_child_count = repeat_children.size();
+		process.ReserveChildSlots(4 + dynamic_child_count - 1);
+		for (idx_t i = repeat_children.size(); i > 0; i--) {
+			auto child_idx = i - 1;
+			process.PushChild({transformer.GetRule("ColumnAnnotation"), repeat_children[child_idx].get()},
+			                  3 + child_idx);
+		}
+	} else {
+		process.ReserveChildSlots(4 - 1);
+	}
 	auto &with_list_opt = list_pr.GetChild(2).Cast<OptionalParseResult>();
 	if (with_list_opt.HasResult()) {
 		process.PushChild({transformer.GetRule("WithList"), with_list_opt.GetResult()}, 2);
@@ -9678,6 +9783,14 @@ void PEGTransformerFactory::InitializeCreateColumnListTrampoline(PEGTransformer 
 unique_ptr<TransformResultValue>
 PEGTransformerFactory::FinalizeCreateColumnListTrampoline(PEGTransformer &transformer,
                                                           GeneratedTransformProcess &process) {
+	auto &list_pr = process.parse_result.Cast<ListParseResult>();
+	idx_t dynamic_child_count = 0;
+	auto &dynamic_repeat_opt = list_pr.GetChild(3).Cast<OptionalParseResult>();
+	if (dynamic_repeat_opt.HasResult()) {
+		auto &dynamic_repeat_pr = dynamic_repeat_opt.GetResult().Cast<RepeatParseResult>();
+		auto dynamic_repeat_children = dynamic_repeat_pr.GetChildren();
+		dynamic_child_count = dynamic_repeat_children.size();
+	}
 	optional<ColumnElements> create_table_column_list {};
 	if (process.child_results[0]) {
 		create_table_column_list = process.TakeResult<ColumnElements>(0);
@@ -9690,8 +9803,17 @@ PEGTransformerFactory::FinalizeCreateColumnListTrampoline(PEGTransformer &transf
 	if (process.child_results[2]) {
 		with_list = process.TakeResult<case_insensitive_map_t<unique_ptr<ParsedExpression>>>(2);
 	}
-	auto result = TransformCreateColumnList(transformer, std::move(create_table_column_list),
-	                                        std::move(partition_sorted_options), std::move(with_list));
+	optional<vector<ColumnAnnotationClause>> column_annotation {};
+	if (dynamic_child_count > 0) {
+		vector<ColumnAnnotationClause> column_annotation_value;
+		for (idx_t i = 3; i < 3 + dynamic_child_count; i++) {
+			column_annotation_value.push_back(process.TakeResult<ColumnAnnotationClause>(i));
+		}
+		column_annotation = std::move(column_annotation_value);
+	}
+	auto result =
+	    TransformCreateColumnList(transformer, std::move(create_table_column_list), std::move(partition_sorted_options),
+	                              std::move(with_list), std::move(column_annotation));
 	return make_uniq<TypedTransformResult<CreateTableDefinition>>(std::move(result));
 }
 
@@ -10259,6 +10381,21 @@ PEGTransformerFactory::FinalizeColumnCompressionTrampoline(PEGTransformer &trans
                                                            GeneratedTransformProcess &process) {
 	auto col_id_or_string = process.TakeResult<Identifier>(0);
 	auto result = TransformColumnCompression(transformer, col_id_or_string);
+	return make_uniq<TypedTransformResult<ColumnConstraintEntry>>(std::move(result));
+}
+
+void PEGTransformerFactory::InitializeColumnAnnotationConstraintTrampoline(PEGTransformer &transformer,
+                                                                           GeneratedTransformProcess &process) {
+	auto &list_pr = process.parse_result.Cast<ListParseResult>();
+	process.ReserveChildSlots(1);
+	process.PushChild({transformer.GetRule("ColumnAnnotation"), list_pr.GetChild(0)}, 0);
+}
+
+unique_ptr<TransformResultValue>
+PEGTransformerFactory::FinalizeColumnAnnotationConstraintTrampoline(PEGTransformer &transformer,
+                                                                    GeneratedTransformProcess &process) {
+	auto column_annotation = process.TakeResult<ColumnAnnotationClause>(0);
+	auto result = TransformColumnAnnotationConstraint(transformer, std::move(column_annotation));
 	return make_uniq<TypedTransformResult<ColumnConstraintEntry>>(std::move(result));
 }
 
@@ -24436,56 +24573,15 @@ void PEGTransformerFactory::InitializeColumnTagsAnnotationTrampoline(PEGTransfor
                                                                      GeneratedTransformProcess &process) {
 	auto &list_pr = process.parse_result.Cast<ListParseResult>();
 	process.ReserveChildSlots(1);
-	process.PushChild({transformer.GetRule("ColumnTagList"), list_pr.GetChild(2)}, 0);
+	process.PushChild({transformer.GetRule("TagAssignmentList"), list_pr.GetChild(1)}, 0);
 }
 
 unique_ptr<TransformResultValue>
 PEGTransformerFactory::FinalizeColumnTagsAnnotationTrampoline(PEGTransformer &transformer,
                                                               GeneratedTransformProcess &process) {
-	auto column_tag_list = process.TakeResult<vector<pair<string, string>>>(0);
-	auto result = TransformColumnTagsAnnotation(transformer, std::move(column_tag_list));
+	auto tag_assignment_list = process.TakeResult<vector<pair<string, string>>>(0);
+	auto result = TransformColumnTagsAnnotation(transformer, std::move(tag_assignment_list));
 	return make_uniq<TypedTransformResult<ColumnAnnotationClause>>(std::move(result));
-}
-
-void PEGTransformerFactory::InitializeColumnTagListTrampoline(PEGTransformer &transformer,
-                                                              GeneratedTransformProcess &process) {
-	auto &list_pr = process.parse_result.Cast<ListParseResult>();
-	auto list_items = ExtractParseResultsFromList(list_pr.GetChild(0));
-	auto dynamic_child_count = list_items.size();
-	process.ReserveChildSlots(1 + dynamic_child_count - 1);
-	for (idx_t i = list_items.size(); i > 0; i--) {
-		auto child_idx = i - 1;
-		process.PushChild({transformer.GetRule("ColumnTagEntry"), list_items[child_idx].get()}, 0 + child_idx);
-	}
-}
-
-unique_ptr<TransformResultValue>
-PEGTransformerFactory::FinalizeColumnTagListTrampoline(PEGTransformer &transformer,
-                                                       GeneratedTransformProcess &process) {
-	auto &list_pr = process.parse_result.Cast<ListParseResult>();
-	auto dynamic_list_items = ExtractParseResultsFromList(list_pr.GetChild(0));
-	auto dynamic_child_count = dynamic_list_items.size();
-	vector<pair<string, string>> column_tag_entry;
-	for (idx_t i = 0; i < 0 + dynamic_child_count; i++) {
-		column_tag_entry.push_back(process.TakeResult<pair<string, string>>(i));
-	}
-	auto result = TransformColumnTagList(transformer, std::move(column_tag_entry));
-	return make_uniq<TypedTransformResult<vector<pair<string, string>>>>(std::move(result));
-}
-
-void PEGTransformerFactory::InitializeColumnTagEntryTrampoline(PEGTransformer &transformer,
-                                                               GeneratedTransformProcess &process) {
-	process.ReserveChildSlots(0);
-}
-
-unique_ptr<TransformResultValue>
-PEGTransformerFactory::FinalizeColumnTagEntryTrampoline(PEGTransformer &transformer,
-                                                        GeneratedTransformProcess &process) {
-	auto &list_pr = process.parse_result.Cast<ListParseResult>();
-	auto string_literal = TransformStringLiteral(transformer, list_pr.GetChild(0));
-	auto string_literal_1 = TransformStringLiteral(transformer, list_pr.GetChild(2));
-	auto result = TransformColumnTagEntry(transformer, string_literal, string_literal_1);
-	return make_uniq<TypedTransformResult<pair<string, string>>>(std::move(result));
 }
 
 void PEGTransformerFactory::InitializeValuesClauseTrampoline(PEGTransformer &transformer,

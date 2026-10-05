@@ -1,4 +1,5 @@
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/parser/column_annotation.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
@@ -111,7 +112,8 @@ unique_ptr<CreateInfo> TableCatalogEntry::GetInfo() const {
 	return std::move(result);
 }
 
-string TableCatalogEntry::ColumnsToSQL(const ColumnList &columns, const vector<unique_ptr<Constraint>> &constraints) {
+string TableCatalogEntry::ColumnsToSQL(const ColumnList &columns, const vector<unique_ptr<Constraint>> &constraints,
+                                       bool include_annotations) {
 	duckdb::stringstream ss;
 
 	ss << "(";
@@ -177,6 +179,9 @@ string TableCatalogEntry::ColumnsToSQL(const ColumnList &columns, const vector<u
 			// single column unique: insert constraint here
 			ss << " UNIQUE";
 		}
+		if (include_annotations) {
+			ss << ColumnAnnotation::ToString(column.Comment(), column.Tags());
+		}
 	}
 	// print any extra constraints that still need to be printed
 	for (auto &extra_constraint : extra_constraints) {
@@ -188,7 +193,7 @@ string TableCatalogEntry::ColumnsToSQL(const ColumnList &columns, const vector<u
 	return ss.str();
 }
 
-string TableCatalogEntry::ColumnNamesToSQL(const ColumnList &columns) {
+string TableCatalogEntry::ColumnNamesToSQL(const ColumnList &columns, bool include_annotations) {
 	if (columns.empty()) {
 		return "";
 	}
@@ -200,7 +205,11 @@ string TableCatalogEntry::ColumnNamesToSQL(const ColumnList &columns) {
 		if (column.Oid() > 0) {
 			ss << ", ";
 		}
-		ss << SQLIdentifier(column.Name()) << " ";
+		ss << SQLIdentifier(column.Name());
+		if (include_annotations) {
+			ss << ColumnAnnotation::ToString(column.Comment(), column.Tags());
+		}
+		ss << " ";
 	}
 	ss << ")";
 	return ss.str();

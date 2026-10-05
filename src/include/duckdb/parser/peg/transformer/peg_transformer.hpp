@@ -6,6 +6,7 @@
 #include "duckdb/parser/peg/transformer/transform_result.hpp"
 #include "duckdb/parser/peg/ast/add_column_entry.hpp"
 #include "duckdb/parser/peg/ast/column_annotation_clause.hpp"
+#include "duckdb/parser/column_annotation.hpp"
 #include "duckdb/parser/peg/ast/column_constraint_entry.hpp"
 #include "duckdb/parser/peg/ast/analyze_target.hpp"
 #include "duckdb/parser/peg/ast/column_elements.hpp"
@@ -94,6 +95,7 @@ DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.CastArguments", C
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.CatalogType", CatalogType);
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.ColumnAnnotationClause", ColumnAnnotationClause);
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.ColumnConstraintEntry", ColumnConstraintEntry);
+DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.ColumnDefinition", ColumnDefinition);
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.ColumnElements", ColumnElements);
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.ColumnList", ColumnList);
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.CommonTableExpressionMap", CommonTableExpressionMap);
@@ -1609,9 +1611,14 @@ public:
 	static void InitializeWithNoDataTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
 	static unique_ptr<TransformResultValue> FinalizeWithNoDataTrampoline(PEGTransformer &transformer,
 	                                                                     GeneratedTransformProcess &process);
-	static void InitializeIdentifierListTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
-	static unique_ptr<TransformResultValue> FinalizeIdentifierListTrampoline(PEGTransformer &transformer,
-	                                                                         GeneratedTransformProcess &process);
+	static void InitializeCreateTableAsColumnListTrampoline(PEGTransformer &transformer,
+	                                                        GeneratedTransformProcess &process);
+	static unique_ptr<TransformResultValue>
+	FinalizeCreateTableAsColumnListTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
+	static void InitializeCreateTableAsColumnTrampoline(PEGTransformer &transformer,
+	                                                    GeneratedTransformProcess &process);
+	static unique_ptr<TransformResultValue> FinalizeCreateTableAsColumnTrampoline(PEGTransformer &transformer,
+	                                                                              GeneratedTransformProcess &process);
 	static void InitializeCreateColumnListTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
 	static unique_ptr<TransformResultValue> FinalizeCreateColumnListTrampoline(PEGTransformer &transformer,
 	                                                                           GeneratedTransformProcess &process);
@@ -1713,6 +1720,10 @@ public:
 	static void InitializeColumnCompressionTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
 	static unique_ptr<TransformResultValue> FinalizeColumnCompressionTrampoline(PEGTransformer &transformer,
 	                                                                            GeneratedTransformProcess &process);
+	static void InitializeColumnAnnotationConstraintTrampoline(PEGTransformer &transformer,
+	                                                           GeneratedTransformProcess &process);
+	static unique_ptr<TransformResultValue>
+	FinalizeColumnAnnotationConstraintTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
 	static void InitializeKeyActionsTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
 	static unique_ptr<TransformResultValue> FinalizeKeyActionsTrampoline(PEGTransformer &transformer,
 	                                                                     GeneratedTransformProcess &process);
@@ -3950,12 +3961,6 @@ public:
 	                                                     GeneratedTransformProcess &process);
 	static unique_ptr<TransformResultValue> FinalizeColumnTagsAnnotationTrampoline(PEGTransformer &transformer,
 	                                                                               GeneratedTransformProcess &process);
-	static void InitializeColumnTagListTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
-	static unique_ptr<TransformResultValue> FinalizeColumnTagListTrampoline(PEGTransformer &transformer,
-	                                                                        GeneratedTransformProcess &process);
-	static void InitializeColumnTagEntryTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
-	static unique_ptr<TransformResultValue> FinalizeColumnTagEntryTrampoline(PEGTransformer &transformer,
-	                                                                         GeneratedTransformProcess &process);
 	static void InitializeValuesClauseTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
 	static unique_ptr<TransformResultValue> FinalizeValuesClauseTrampoline(PEGTransformer &transformer,
 	                                                                       GeneratedTransformProcess &process);
@@ -4601,6 +4606,7 @@ public:
 	TransformCreateTableAs(PEGTransformer &transformer, optional<ColumnList> identifier_list,
 	                       optional<PartitionSortedOptions> partition_sorted_options,
 	                       optional<case_insensitive_map_t<unique_ptr<ParsedExpression>>> with_list,
+	                       optional<vector<ColumnAnnotationClause>> column_annotation,
 	                       unique_ptr<SQLStatement> statement, const optional<bool> &with_data);
 	static PartitionSortedOptions
 	TransformPartitionOptSortedOptions(PEGTransformer &transformer,
@@ -4615,11 +4621,11 @@ public:
 	                                                                   vector<unique_ptr<ParsedExpression>> expression);
 	static bool TransformWithDataOnly(PEGTransformer &transformer);
 	static bool TransformWithNoData(PEGTransformer &transformer);
-	static ColumnList TransformIdentifierList(PEGTransformer &transformer, const vector<Identifier> &identifier);
 	static CreateTableDefinition
 	TransformCreateColumnList(PEGTransformer &transformer, optional<ColumnElements> create_table_column_list,
 	                          optional<PartitionSortedOptions> partition_sorted_options,
-	                          optional<case_insensitive_map_t<unique_ptr<ParsedExpression>>> with_list);
+	                          optional<case_insensitive_map_t<unique_ptr<ParsedExpression>>> with_list,
+	                          optional<vector<ColumnAnnotationClause>> column_annotation);
 	static bool TransformIfNotExists(PEGTransformer &transformer);
 	static QualifiedName
 	TransformSchemaReservedIdentifierOrStringLiteral(PEGTransformer &transformer,
@@ -4664,6 +4670,16 @@ public:
 	                                                      const vector<string> &dotted_identifier);
 	static ColumnConstraintEntry TransformColumnCompression(PEGTransformer &transformer,
 	                                                        const Identifier &col_id_or_string);
+	static ColumnConstraintEntry TransformColumnAnnotationConstraint(PEGTransformer &transformer,
+	                                                                 ColumnAnnotationClause column_annotation);
+	static ColumnList TransformCreateTableAsColumnList(PEGTransformer &transformer,
+	                                                   vector<ColumnDefinition> create_table_as_column);
+	static ColumnDefinition TransformCreateTableAsColumn(PEGTransformer &transformer, const Identifier &identifier,
+	                                                     optional<vector<ColumnAnnotationClause>> column_annotation);
+	//! Combines the COMMENT and TAGS clauses declared for an object, rejecting clauses that are repeated
+	static shared_ptr<ColumnAnnotation> CombineAnnotationClauses(vector<ColumnAnnotationClause> clauses,
+	                                                             const string &object_name,
+	                                                             QueryLocation location = QueryLocation());
 	static KeyActions TransformUpdateFirstKeyActions(PEGTransformer &transformer, const string &update_action,
 	                                                 const optional<string> &delete_action);
 	static KeyActions TransformDeleteFirstKeyActions(PEGTransformer &transformer, const string &delete_action,
@@ -5803,11 +5819,7 @@ public:
 	static ColumnAnnotationClause TransformColumnCommentAnnotation(PEGTransformer &transformer,
 	                                                               const string &string_literal);
 	static ColumnAnnotationClause TransformColumnTagsAnnotation(PEGTransformer &transformer,
-	                                                            vector<pair<string, string>> column_tag_list);
-	static vector<pair<string, string>> TransformColumnTagList(PEGTransformer &transformer,
-	                                                           vector<pair<string, string>> column_tag_entry);
-	static pair<string, string> TransformColumnTagEntry(PEGTransformer &transformer, const string &string_literal,
-	                                                    const string &string_literal_1);
+	                                                            vector<pair<string, string>> tag_assignment_list);
 	static unique_ptr<SelectStatement>
 	TransformValuesClause(PEGTransformer &transformer, vector<vector<unique_ptr<ParsedExpression>>> values_expressions);
 	static vector<unique_ptr<ParsedExpression>>

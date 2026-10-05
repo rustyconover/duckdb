@@ -1318,6 +1318,39 @@ PEGTransformerFactory::TransformSelectTargetList(PEGTransformer &transformer,
 	return select_target_entry;
 }
 
+shared_ptr<ColumnAnnotation> PEGTransformerFactory::CombineAnnotationClauses(vector<ColumnAnnotationClause> clauses,
+                                                                             const string &object_name,
+                                                                             QueryLocation location) {
+	auto annotation = make_shared_ptr<ColumnAnnotation>();
+	bool has_comment = false;
+	bool has_tags = false;
+	for (auto &clause : clauses) {
+		switch (clause.type) {
+		case ColumnAnnotationClauseType::COMMENT:
+			if (has_comment) {
+				throw ParserException(location, "COMMENT specified more than once for %s", object_name);
+			}
+			has_comment = true;
+			annotation->comment = Value(std::move(clause.comment));
+			break;
+		case ColumnAnnotationClauseType::TAGS:
+			if (has_tags) {
+				throw ParserException(location, "TAGS specified more than once for %s", object_name);
+			}
+			has_tags = true;
+			for (auto &tag : clause.tags) {
+				if (annotation->tags.contains(tag.first)) {
+					throw ParserException(location, "Tag %s should be specified at most once for %s",
+					                      SQLString(tag.first), object_name);
+				}
+				annotation->tags.insert(std::move(tag));
+			}
+			break;
+		}
+	}
+	return annotation;
+}
+
 unique_ptr<ParsedExpression>
 PEGTransformerFactory::TransformAnnotatedTarget(PEGTransformer &transformer,
                                                 unique_ptr<ParsedExpression> explicit_alias,
@@ -1325,38 +1358,9 @@ PEGTransformerFactory::TransformAnnotatedTarget(PEGTransformer &transformer,
 	if (!column_annotation) {
 		return explicit_alias;
 	}
-	auto annotation = make_shared_ptr<ColumnAnnotation>();
-	bool has_comment = false;
-	bool has_tags = false;
-	auto column_name = SQLIdentifier(explicit_alias->GetAlias());
-	for (auto &clause : *column_annotation) {
-		switch (clause.type) {
-		case ColumnAnnotationClauseType::COMMENT:
-			if (has_comment) {
-				throw ParserException(explicit_alias->GetQueryLocation(),
-				                      "COMMENT specified more than once for column %s", column_name);
-			}
-			has_comment = true;
-			annotation->comment = Value(std::move(clause.comment));
-			break;
-		case ColumnAnnotationClauseType::TAGS:
-			if (has_tags) {
-				throw ParserException(explicit_alias->GetQueryLocation(), "TAGS specified more than once for column %s",
-				                      column_name);
-			}
-			has_tags = true;
-			for (auto &tag : clause.tags) {
-				if (annotation->tags.contains(tag.first)) {
-					throw ParserException(explicit_alias->GetQueryLocation(),
-					                      "Tag %s should be specified at most once for column %s", SQLString(tag.first),
-					                      column_name);
-				}
-				annotation->tags.insert(std::move(tag));
-			}
-			break;
-		}
-	}
-	explicit_alias->SetAnnotation(std::move(annotation));
+	auto column_name = "column " + SQLIdentifier::ToString(explicit_alias->GetAlias());
+	explicit_alias->SetAnnotation(
+	    CombineAnnotationClauses(std::move(*column_annotation), column_name, explicit_alias->GetQueryLocation()));
 	return explicit_alias;
 }
 
@@ -1370,23 +1374,11 @@ ColumnAnnotationClause PEGTransformerFactory::TransformColumnCommentAnnotation(P
 
 ColumnAnnotationClause
 PEGTransformerFactory::TransformColumnTagsAnnotation(PEGTransformer &transformer,
-                                                     vector<pair<string, string>> column_tag_list) {
+                                                     vector<pair<string, string>> tag_assignment_list) {
 	ColumnAnnotationClause result;
 	result.type = ColumnAnnotationClauseType::TAGS;
-	result.tags = std::move(column_tag_list);
+	result.tags = std::move(tag_assignment_list);
 	return result;
-}
-
-vector<pair<string, string>>
-PEGTransformerFactory::TransformColumnTagList(PEGTransformer &transformer,
-                                              vector<pair<string, string>> column_tag_entry) {
-	return column_tag_entry;
-}
-
-pair<string, string> PEGTransformerFactory::TransformColumnTagEntry(PEGTransformer &transformer,
-                                                                    const string &string_literal,
-                                                                    const string &string_literal_1) {
-	return make_pair(string_literal, string_literal_1);
 }
 
 vector<string> PEGTransformerFactory::TransformColumnAliases(PEGTransformer &transformer,

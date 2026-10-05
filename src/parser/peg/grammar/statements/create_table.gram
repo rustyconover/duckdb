@@ -9,7 +9,7 @@ TemporaryPersistent <- 'TEMPORARY'
 CreateTableStmt <- 'TABLE' IfNotExists? QualifiedName CreateTableDefinition CommitAction?
 CreateTableDefinition <- CreateTableAs / CreateColumnList
 
-CreateTableAs <- IdentifierList? PartitionSortedOptions? WithList? 'AS' Statement WithData?
+CreateTableAs <- CreateTableAsColumnList? PartitionSortedOptions? WithList? ColumnAnnotation* 'AS' Statement WithData?
 PartitionSortedOptions <- PartitionOptSortedOptions / SortedOptPartitionOptions
 PartitionOptSortedOptions <- PartitionOptions SortedOptions?
 SortedOptPartitionOptions <- SortedOptions PartitionOptions?
@@ -19,8 +19,9 @@ SortedOptions <- 'SORTED' 'BY' Parens(List(Expression))
 WithData <- WithDataOnly / WithNoData
 WithDataOnly <- 'WITH' 'DATA'
 WithNoData <- 'WITH' 'NO' 'DATA'
-IdentifierList <- Parens(List(Identifier))
-CreateColumnList <- Parens(CreateTableColumnList?) PartitionSortedOptions? WithList?
+CreateTableAsColumnList <- Parens(List(CreateTableAsColumn))
+CreateTableAsColumn <- Identifier ColumnAnnotation*
+CreateColumnList <- Parens(CreateTableColumnList?) PartitionSortedOptions? WithList? ColumnAnnotation*
 IfNotExists <- 'IF' 'NOT' 'EXISTS'
 QualifiedName <- CatalogReservedSchemaIdentifier / SchemaReservedIdentifierOrStringLiteral / IdentifierOrStringLiteral
 SchemaReservedIdentifierOrStringLiteral <- SchemaQualification ReservedIdentifierOrStringLiteral
@@ -38,7 +39,7 @@ CreateTableColumnElement <- CreateTableColumnDefinition / CreateTableConstraint
 CreateTableColumnDefinition <- ColumnDefinition
 CreateTableConstraint <- TopLevelConstraint
 ColumnDefinition <- DottedIdentifier Type? GeneratedColumn? ConstraintNameClause? ColumnConstraint*
-ColumnConstraint <- NotNullConstraint / UniqueConstraint / PrimaryKeyConstraint / DefaultValue / CheckConstraint / ForeignKeyConstraint / ColumnCollation / ColumnCompression
+ColumnConstraint <- NotNullConstraint / UniqueConstraint / PrimaryKeyConstraint / DefaultValue / CheckConstraint / ForeignKeyConstraint / ColumnCollation / ColumnCompression / ColumnAnnotationConstraint
 NotNullConstraint <- NullConstraint / NotNullColumnConstraint
 NullConstraint <- 'NULL'
 NotNullColumnConstraint <- 'NOT' 'NULL'
@@ -49,6 +50,7 @@ CheckConstraint <- 'CHECK' Parens(Expression)
 ForeignKeyConstraint <- 'REFERENCES' BaseTableName Parens(ColumnList)? KeyActions?
 ColumnCollation <- 'COLLATE' DottedIdentifier
 ColumnCompression <- 'USING' 'COMPRESSION' ColIdOrString
+ColumnAnnotationConstraint <- ColumnAnnotation
 
 KeyActions <- UpdateFirstKeyActions / DeleteFirstKeyActions
 UpdateFirstKeyActions <- UpdateAction DeleteAction?

@@ -1,3 +1,4 @@
+#include "duckdb/common/sql_identifier.hpp"
 #include "duckdb/parser/peg/ast/column_constraint_entry.hpp"
 #include "duckdb/parser/expression/star_expression.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
@@ -20,6 +21,14 @@
 #include "duckdb/parser/expression/cast_expression.hpp"
 
 namespace duckdb {
+
+static void ApplyColumnAnnotationClauses(vector<ColumnAnnotationClause> clauses, ColumnDefinition &column) {
+	if (clauses.empty()) {
+		return;
+	}
+	auto column_name = "column " + SQLIdentifier::ToString(column.Name());
+	PEGTransformerFactory::CombineAnnotationClauses(std::move(clauses), column_name)->ApplyTo(column);
+}
 
 unique_ptr<SQLStatement>
 PEGTransformerFactory::TransformCreateStatement(PEGTransformer &transformer, const optional<bool> &or_replace,
@@ -81,6 +90,13 @@ unique_ptr<CreateStatement> PEGTransformerFactory::TransformCreateTableStmt(
 	info->partition_keys = std::move(create_table_definition.partition_keys);
 	info->sort_keys = std::move(create_table_definition.sort_keys);
 	info->options = std::move(create_table_definition.options);
+	if (create_table_definition.annotation) {
+		auto &annotation = *create_table_definition.annotation;
+		if (!annotation.comment.IsNull()) {
+			info->comment = annotation.comment;
+		}
+		info->tags = annotation.tags;
+	}
 
 	result->info = std::move(info);
 	return result;
@@ -90,6 +106,7 @@ CreateTableDefinition
 PEGTransformerFactory::TransformCreateTableAs(PEGTransformer &transformer, optional<ColumnList> identifier_list,
                                               optional<PartitionSortedOptions> partition_sorted_options,
                                               optional<case_insensitive_map_t<unique_ptr<ParsedExpression>>> with_list,
+                                              optional<vector<ColumnAnnotationClause>> column_annotation,
                                               unique_ptr<SQLStatement> statement, const optional<bool> &with_data) {
 	CreateTableDefinition result;
 	if (identifier_list) {
@@ -101,6 +118,9 @@ PEGTransformerFactory::TransformCreateTableAs(PEGTransformer &transformer, optio
 	}
 	if (with_list) {
 		result.options = std::move(*with_list);
+	}
+	if (column_annotation) {
+		result.annotation = CombineAnnotationClauses(std::move(*column_annotation), "the table");
 	}
 	if (statement->type != StatementType::SELECT_STATEMENT) {
 		throw ParserException("CREATE TABLE AS requires a SELECT clause");
@@ -114,11 +134,22 @@ PEGTransformerFactory::TransformCreateTableAs(PEGTransformer &transformer, optio
 	return result;
 }
 
-ColumnList PEGTransformerFactory::TransformIdentifierList(PEGTransformer &transformer,
-                                                          const vector<Identifier> &identifier) {
+ColumnList PEGTransformerFactory::TransformCreateTableAsColumnList(PEGTransformer &transformer,
+                                                                   vector<ColumnDefinition> create_table_as_column) {
 	ColumnList result;
-	for (auto &name : identifier) {
-		result.AddColumn(ColumnDefinition(name, LogicalType::UNKNOWN));
+	for (auto &column : create_table_as_column) {
+		result.AddColumn(std::move(column));
+	}
+	return result;
+}
+
+ColumnDefinition
+PEGTransformerFactory::TransformCreateTableAsColumn(PEGTransformer &transformer, const Identifier &identifier,
+                                                    optional<vector<ColumnAnnotationClause>> column_annotation) {
+	ColumnDefinition result(identifier, LogicalType::UNKNOWN);
+	if (column_annotation) {
+		auto column_name = "column " + SQLIdentifier::ToString(identifier);
+		CombineAnnotationClauses(std::move(*column_annotation), column_name)->ApplyTo(result);
 	}
 	return result;
 }
@@ -126,7 +157,8 @@ ColumnList PEGTransformerFactory::TransformIdentifierList(PEGTransformer &transf
 CreateTableDefinition PEGTransformerFactory::TransformCreateColumnList(
     PEGTransformer &transformer, optional<ColumnElements> create_table_column_list,
     optional<PartitionSortedOptions> partition_sorted_options,
-    optional<case_insensitive_map_t<unique_ptr<ParsedExpression>>> with_list) {
+    optional<case_insensitive_map_t<unique_ptr<ParsedExpression>>> with_list,
+    optional<vector<ColumnAnnotationClause>> column_annotation) {
 	if (!create_table_column_list || create_table_column_list->columns.empty()) {
 		throw ParserException("Table must have at least one column!");
 	}
@@ -139,6 +171,9 @@ CreateTableDefinition PEGTransformerFactory::TransformCreateColumnList(
 	}
 	if (with_list) {
 		result.options = std::move(*with_list);
+	}
+	if (column_annotation) {
+		result.annotation = CombineAnnotationClauses(std::move(*column_annotation), "the table");
 	}
 	return result;
 }
@@ -236,6 +271,7 @@ ConstraintColumnDefinition PEGTransformerFactory::TransformColumnDefinition(
 	auto column_type = has_type ? *type : LogicalType::ANY;
 	CompressionType compression_type = CompressionType::COMPRESSION_AUTO;
 	bool has_collation = false;
+	vector<ColumnAnnotationClause> annotation_clauses;
 	ColumnConstraint accumulated_constraints;
 	if (column_constraint) {
 		for (auto &cc_entry : *column_constraint) {
@@ -268,6 +304,8 @@ ConstraintColumnDefinition PEGTransformerFactory::TransformColumnDefinition(
 					throw ParserException("Collations are not supported on generated columns");
 				}
 				column_type = ApplyColumnCollation(column_type, std::move(cc_entry.expression));
+			} else if (cc_entry.constraint_name == "ColumnAnnotation") {
+				annotation_clauses.push_back(std::move(cc_entry.annotation));
 			} else {
 				accumulated_constraints.constraints.push_back(std::move(cc_entry.constraint));
 			}
@@ -289,6 +327,7 @@ ConstraintColumnDefinition PEGTransformerFactory::TransformColumnDefinition(
 
 		ColumnDefinition col(qualified_name.Name(), column_type, std::move(generated.expr), TableColumnType::GENERATED);
 		col.SetCompressionType(compression_type);
+		ApplyColumnAnnotationClauses(std::move(annotation_clauses), col);
 		if (accumulated_constraints.default_value) {
 			throw ParserException("Not allowed to set default on a generated column");
 		}
@@ -303,6 +342,7 @@ ConstraintColumnDefinition PEGTransformerFactory::TransformColumnDefinition(
 		col.SetDefaultValue(std::move(accumulated_constraints.default_value));
 	}
 	col.SetCompressionType(compression_type);
+	ApplyColumnAnnotationClauses(std::move(annotation_clauses), col);
 	ConstraintColumnDefinition result = {std::move(col), accumulated_constraints.constraint_types,
 	                                     std::move(accumulated_constraints.constraints)};
 	return result;
@@ -479,6 +519,15 @@ ColumnConstraintEntry PEGTransformerFactory::TransformNotNullConstraint(PEGTrans
 	ColumnConstraintEntry entry;
 	entry.constraint_name = "NotNullConstraint";
 	entry.constraint_type_info = make_pair(false, child ? ConstraintType::NOT_NULL : ConstraintType::INVALID);
+	return entry;
+}
+
+ColumnConstraintEntry
+PEGTransformerFactory::TransformColumnAnnotationConstraint(PEGTransformer &transformer,
+                                                           ColumnAnnotationClause column_annotation) {
+	ColumnConstraintEntry entry;
+	entry.constraint_name = "ColumnAnnotation";
+	entry.annotation = std::move(column_annotation);
 	return entry;
 }
 

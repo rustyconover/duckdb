@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/case_insensitive_map.hpp"
+#include "duckdb/parser/column_annotation.hpp"
 #include "duckdb/parser/column_list.hpp"
 #include "duckdb/parser/constraint.hpp"
 #include "duckdb/parser/parsed_expression.hpp"
@@ -14,5 +15,7 @@ struct CreateTableDefinition {
 	vector<unique_ptr<ParsedExpression>> partition_keys;
 	vector<unique_ptr<ParsedExpression>> sort_keys;
 	case_insensitive_map_t<unique_ptr<ParsedExpression>> options;
+	//! The COMMENT and TAGS declared for the table
+	shared_ptr<ColumnAnnotation> annotation;
 };
 } // namespace duckdb

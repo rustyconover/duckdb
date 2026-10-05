@@ -1,4 +1,5 @@
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
+#include "duckdb/parser/column_annotation.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog.hpp"
@@ -83,12 +84,14 @@ string CreateTableInfo::ToString() const {
 	ret += QualifiedNameToString();
 
 	if (query != nullptr) {
-		ret += TableCatalogEntry::ColumnNamesToSQL(columns);
+		ret += TableCatalogEntry::ColumnNamesToSQL(columns, true);
 		ret += ExtraOptionsToString();
+		ret += ColumnAnnotation::ToString(comment, tags);
 		ret += " AS " + query->ToString();
 	} else {
-		ret += TableCatalogEntry::ColumnsToSQL(columns, constraints);
+		ret += TableCatalogEntry::ColumnsToSQL(columns, constraints, true);
 		ret += ExtraOptionsToString();
+		ret += ColumnAnnotation::ToString(comment, tags);
 		ret += ";";
 	}
 	return ret;

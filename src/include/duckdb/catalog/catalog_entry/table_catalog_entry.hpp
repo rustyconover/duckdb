@@ -113,10 +113,11 @@ public:
 		return false;
 	}
 
-	DUCKDB_API static string ColumnsToSQL(const ColumnList &columns, const vector<unique_ptr<Constraint>> &constraints);
+	DUCKDB_API static string ColumnsToSQL(const ColumnList &columns, const vector<unique_ptr<Constraint>> &constraints,
+	                                      bool include_annotations = false);
 
 	//! Returns the expression string list of the column names e.g. (col1, col2, col3)
-	static string ColumnNamesToSQL(const ColumnList &columns);
+	static string ColumnNamesToSQL(const ColumnList &columns, bool include_annotations = false);
 
 	//! Returns a list of segment information for this table, if exists
 	virtual vector<ColumnSegmentInfo>

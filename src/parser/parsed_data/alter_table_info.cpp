@@ -1,4 +1,5 @@
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
+#include "duckdb/parser/column_annotation.hpp"
 
 #include "duckdb/common/sql_identifier.hpp"
 #include "duckdb/common/logical_type_info.hpp"
@@ -251,6 +252,7 @@ string AddColumnInfo::ToString() const {
 	if (this->new_column.CompressionType() != CompressionType::COMPRESSION_AUTO) {
 		result += " USING COMPRESSION " + CompressionTypeToString(this->new_column.CompressionType());
 	}
+	result += ColumnAnnotation::ToString(this->new_column.Comment(), this->new_column.Tags());
 	result += ";";
 	return result;
 }

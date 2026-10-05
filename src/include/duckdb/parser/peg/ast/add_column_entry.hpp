@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/types/value.hpp"
+#include "duckdb/parser/column_annotation.hpp"
 #include "duckdb/parser/column_definition.hpp"
 #include "duckdb/parser/constraint.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
@@ -15,6 +16,8 @@ struct AddColumnEntry {
 	//! Constraints applied via extra ALTER statements after the column is added
 	AddColumnConstraints add_column_constraints;
 	CompressionType compression_type = CompressionType::COMPRESSION_AUTO;
+	//! The COMMENT and TAGS declared for the column
+	shared_ptr<ColumnAnnotation> annotation;
 };
 
 } // namespace duckdb

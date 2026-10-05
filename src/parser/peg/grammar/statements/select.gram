@@ -222,9 +222,7 @@ AnnotatedTarget <- ExplicitAlias ColumnAnnotation*
 ExplicitAlias <- ColIdExpression / ExpressionAsCollabel
 ColumnAnnotation <- ColumnCommentAnnotation / ColumnTagsAnnotation
 ColumnCommentAnnotation <- 'COMMENT' StringLiteral
-ColumnTagsAnnotation <- 'TAGS' '{' ColumnTagList '}'
-ColumnTagList <- List(ColumnTagEntry)
-ColumnTagEntry <- StringLiteral ':' StringLiteral
+ColumnTagsAnnotation <- 'TAGS' TagAssignmentList
 
 ValuesClause <- 'VALUES' List(ValuesExpressions)
 ValuesExpressions <- Parens(List(Expression))

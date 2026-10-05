@@ -16,6 +16,7 @@ namespace duckdb {
 
 class Serializer;
 class Deserializer;
+class ColumnDefinition;
 
 //! The COMMENT and TAGS declared for a column in a SELECT list
 struct ColumnAnnotation {
@@ -27,6 +28,10 @@ struct ColumnAnnotation {
 public:
 	//! Renders the annotation as it appears after the column alias, e.g. " COMMENT 'text' TAGS {'k': 'v'}"
 	string ToString() const;
+	//! Renders a comment and tags as COMMENT and TAGS clauses, with a leading space
+	static string ToString(const Value &comment, const InsertionOrderPreservingMap<string> &tags);
+	//! Applies the comment and tags to a column definition
+	void ApplyTo(ColumnDefinition &column) const;
 
 	void Serialize(Serializer &serializer) const;
 	static shared_ptr<ColumnAnnotation> Deserialize(Deserializer &deserializer);
