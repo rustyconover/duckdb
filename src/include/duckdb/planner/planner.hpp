@@ -35,6 +35,8 @@ public:
 	ClientContext &context;
 
 	StatementProperties properties;
+	//! The comment and tags of the result columns, or nullptr if no column has any
+	shared_ptr<const vector<ColumnAnnotation>> column_annotations;
 	bound_parameter_map_t value_map;
 
 public:

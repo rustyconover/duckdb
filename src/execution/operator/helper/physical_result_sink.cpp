@@ -281,7 +281,7 @@ unique_ptr<QueryResult> PhysicalResultSink::GetResult(GlobalSinkState &state) co
 	D_ASSERT(collection);
 	return make_uniq<QueryResult>(statement_type, properties, types, names, std::move(collection),
 	                              buffered_data.SharedFormat(), buffered_data.SharedFormatState(),
-	                              cc->GetClientProperties());
+	                              buffered_data.FormatContext().client_properties);
 }
 
 OperatorPartitionInfo PhysicalResultSink::RequiredPartitionInfo() const {

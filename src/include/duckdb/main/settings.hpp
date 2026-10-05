@@ -345,6 +345,20 @@ struct ArrowLosslessConversionSetting {
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };
 
+struct ArrowOutputColumnMetadataSetting {
+	using RETURN_TYPE = bool;
+	static constexpr const char *Name = "arrow_output_column_metadata";
+	static constexpr const char *Description =
+	    "Whether the export to the Arrow format should write the comment and tags of result columns as field metadata "
+	    "(duckdb:comment and duckdb:tag:<key>).";
+	static constexpr const char *InputType = "BOOLEAN";
+	static constexpr bool IsDebug = false;
+	static constexpr bool IsDeprecated = false;
+	static constexpr const char *DefaultValue = "true";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::GLOBAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
 struct ArrowOutputListViewSetting {
 	using RETURN_TYPE = bool;
 	static constexpr const char *Name = "arrow_output_list_view";

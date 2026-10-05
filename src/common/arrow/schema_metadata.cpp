@@ -33,9 +33,8 @@ ArrowSchemaMetadata::ArrowSchemaMetadata(const char *metadata) {
 		}
 	}
 	// We ignore errors of the metadata parsing if the extension is different from arrow.opaque
-	const bool ignore_errors =
-	    schema_metadata_map[ARROW_EXTENSION_NAME] != ArrowExtensionMetadata::ARROW_EXTENSION_NON_CANONICAL;
-	extension_metadata_map = StringUtil::ParseJSONMap(schema_metadata_map[ARROW_METADATA_KEY], ignore_errors);
+	const bool ignore_errors = GetOption(ARROW_EXTENSION_NAME) != ArrowExtensionMetadata::ARROW_EXTENSION_NON_CANONICAL;
+	extension_metadata_map = StringUtil::ParseJSONMap(GetOption(ARROW_METADATA_KEY), ignore_errors);
 }
 
 ArrowSchemaMetadata::ArrowSchemaMetadata() {
@@ -82,8 +81,41 @@ static string GetMapValue(const unordered_map<string, string> &map, const string
 }
 
 ArrowExtensionMetadata ArrowSchemaMetadata::GetExtensionInfo(string format) {
-	return {schema_metadata_map[ARROW_EXTENSION_NAME], GetMapValue(extension_metadata_map, "vendor_name"),
+	return {GetOption(ARROW_EXTENSION_NAME), GetMapValue(extension_metadata_map, "vendor_name"),
 	        GetMapValue(extension_metadata_map, "type_name"), std::move(format)};
+}
+
+Value ArrowSchemaMetadata::GetComment() const {
+	auto entry = schema_metadata_map.find(DUCKDB_COMMENT_KEY);
+	if (entry == schema_metadata_map.end()) {
+		entry = schema_metadata_map.find(COMMENT_KEY);
+	}
+	if (entry == schema_metadata_map.end()) {
+		return Value();
+	}
+	return Value(entry->second);
+}
+
+InsertionOrderPreservingMap<string> ArrowSchemaMetadata::GetTags() const {
+	InsertionOrderPreservingMap<string> result;
+	for (auto &option : schema_metadata_map) {
+		if (StringUtil::StartsWith(option.first, DUCKDB_TAG_KEY_PREFIX)) {
+			auto tag_key = option.first.substr(strlen(DUCKDB_TAG_KEY_PREFIX));
+			if (!tag_key.empty()) {
+				result[tag_key] = option.second;
+			}
+		}
+	}
+	return result;
+}
+
+void ArrowSchemaMetadata::AddCommentAndTags(const Value &comment, const InsertionOrderPreservingMap<string> &tags) {
+	if (!comment.IsNull()) {
+		AddOption(DUCKDB_COMMENT_KEY, comment.ToString());
+	}
+	for (auto &tag : tags) {
+		AddOption(DUCKDB_TAG_KEY_PREFIX + tag.first, tag.second);
+	}
 }
 
 unsafe_unique_array<char> ArrowSchemaMetadata::SerializeMetadata() const {

@@ -13,6 +13,7 @@
 
 #include "duckdb/common/arrow/arrow_appender.hpp"
 #include "duckdb/common/arrow/schema_metadata.hpp"
+#include "duckdb/parser/column_annotation.hpp"
 #include "duckdb/main/client_context.hpp"
 namespace duckdb {
 
@@ -447,6 +448,16 @@ void ArrowConverter::ToArrowSchema(ArrowSchema *out_schema, const vector<Logical
 		auto &child = root_holder->children[col_idx];
 		InitializeChild(child, *root_holder, names[col_idx]);
 		SetArrowFormat(*root_holder, child, types[col_idx], options, *options.client_context);
+		if (options.column_annotations && options.column_annotations->size() == column_count) {
+			auto &annotation = (*options.column_annotations)[col_idx];
+			if (!annotation.comment.IsNull() || !annotation.tags.empty()) {
+				// add the comment and tags to the metadata of an extension type, if any
+				ArrowSchemaMetadata metadata(child.metadata);
+				metadata.AddCommentAndTags(annotation.comment, annotation.tags);
+				root_holder->metadata_info.emplace_back(metadata.SerializeMetadata());
+				child.metadata = root_holder->metadata_info.back().get();
+			}
+		}
 	}
 
 	// Release ownership to caller

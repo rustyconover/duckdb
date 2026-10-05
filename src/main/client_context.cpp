@@ -299,6 +299,7 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 	auto logical_plan = std::move(logical_planner.plan);
 	// extract the result column names from the plan
 	result->properties = logical_planner.properties;
+	result->column_annotations = logical_planner.column_annotations;
 	result->names = logical_planner.names;
 	result->types = logical_planner.types;
 	result->value_map = std::move(logical_planner.value_map);

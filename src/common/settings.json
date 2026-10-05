@@ -150,6 +150,13 @@
         "default_value": "false"
     },
     {
+        "name": "arrow_output_column_metadata",
+        "description": "Whether the export to the Arrow format should write the comment and tags of result columns as field metadata (duckdb:comment and duckdb:tag:<key>).",
+        "type": "BOOLEAN",
+        "default_scope": "global",
+        "default_value": "true"
+    },
+    {
         "name": "arrow_output_list_view",
         "description": "Whether the export to the Arrow format should use ListView as the physical layout for LIST columns.",
         "type": "BOOLEAN",

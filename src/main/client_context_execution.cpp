@@ -235,6 +235,9 @@ unique_ptr<QueryResult> ClientContext::SubmitPreparedStatementInternal(
 
 	// Read before Initialize starts the workers: a SET statement writes the settings from a task
 	auto client_properties = GetClientProperties();
+	if (Settings::Get<ArrowOutputColumnMetadataSetting>(*this)) {
+		client_properties.column_annotations = statement_data.column_annotations;
+	}
 	auto types = statement_data.types;
 
 	// The buffer is created here, on the client thread, and handed to the sink, the executor and the

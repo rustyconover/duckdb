@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb/function/table_function.hpp"
+#include "duckdb/parser/column_list.hpp"
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/common/mutex.hpp"
@@ -64,6 +65,8 @@ public:
 	ArrowTableSchema arrow_table;
 	//! Whether projection pushdown is enabled on the scan
 	bool projection_pushdown_enabled = true;
+	//! The returned columns, with the comment and tags read from the field metadata
+	ColumnList columns;
 };
 
 struct ArrowRunEndEncodingState {

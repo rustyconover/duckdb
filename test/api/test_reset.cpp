@@ -130,6 +130,7 @@ OptionValueSet GetValueForOption(const string &name, const LogicalType &type) {
 	    {"allocator_flush_threshold", {"4.0 GiB"}},
 	    {"allocator_bulk_deallocation_flush_threshold", {"4.0 GiB"}},
 	    {"arrow_output_version", {"1.5"}},
+	    {"arrow_output_column_metadata", {false}},
 	    {"enable_external_file_cache", {false}},
 	    {"external_file_cache_local_max_block_size", {Value::UBIGINT(4096)}},
 	    {"external_file_cache_remote_max_block_size", {Value::UBIGINT(4096)}},

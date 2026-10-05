@@ -89,6 +89,7 @@ static const ConfigurationOption internal_options[] = {
     DUCKDB_SETTING(ApproximateJoinOrderThresholdSetting),
     DUCKDB_SETTING(ArrowLargeBufferSizeSetting),
     DUCKDB_SETTING(ArrowLosslessConversionSetting),
+    DUCKDB_SETTING(ArrowOutputColumnMetadataSetting),
     DUCKDB_SETTING(ArrowOutputListViewSetting),
     DUCKDB_SETTING_CALLBACK(ArrowOutputVersionSetting),
     DUCKDB_SETTING(AsofLoopJoinThresholdSetting),

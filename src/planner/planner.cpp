@@ -1,4 +1,6 @@
 #include "duckdb/planner/planner.hpp"
+#include "duckdb/parser/column_annotation.hpp"
+#include "duckdb/planner/operator/logical_execute.hpp"
 
 #include "duckdb/common/serializer/binary_deserializer.hpp"
 #include "duckdb/common/serializer/binary_serializer.hpp"
@@ -188,6 +190,17 @@ static void RunPostBindExtensions(ClientContext &context, Binder &binder, BoundS
 	}
 }
 
+//! The comment and tags DESCRIBE reports for the result columns, or nullptr if no column has any
+static shared_ptr<const vector<ColumnAnnotation>> GetResultColumnAnnotations(Binder &binder, LogicalOperator &plan) {
+	auto annotations = binder.DescribeColumnAnnotations(plan);
+	for (auto &annotation : annotations) {
+		if (!annotation.comment.IsNull() || !annotation.tags.empty()) {
+			return make_shared_ptr<const vector<ColumnAnnotation>>(std::move(annotations));
+		}
+	}
+	return nullptr;
+}
+
 void Planner::CreatePlan(SQLStatement &statement) {
 	auto &profiler = QueryProfiler::Get(context);
 	auto parameter_count = statement.named_param_map.size();
@@ -207,6 +220,11 @@ void Planner::CreatePlan(SQLStatement &statement) {
 		this->names = bound_statement.names;
 		this->types = bound_statement.types;
 		this->plan = std::move(bound_statement.plan);
+		if (statement.type == StatementType::SELECT_STATEMENT && this->plan) {
+			this->column_annotations = GetResultColumnAnnotations(*binder, *this->plan);
+		} else if (this->plan && this->plan->type == LogicalOperatorType::LOGICAL_EXECUTE) {
+			this->column_annotations = this->plan->Cast<LogicalExecute>().prepared->column_annotations;
+		}
 	} catch (const std::exception &ex) {
 		ErrorData error(ex);
 		this->plan = nullptr;
@@ -281,6 +299,7 @@ shared_ptr<PreparedStatementData> Planner::PrepareSQLStatement(unique_ptr<SQLSta
 	prepared_data->types = types;
 	prepared_data->value_map = std::move(value_map);
 	prepared_data->properties = properties;
+	prepared_data->column_annotations = column_annotations;
 	return prepared_data;
 }
 

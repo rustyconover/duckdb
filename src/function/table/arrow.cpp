@@ -73,7 +73,20 @@ unique_ptr<FunctionData> ArrowTableFunction::ArrowScanBind(ClientContext &contex
 	if (return_types.empty()) {
 		throw InvalidInputException("Provided table/dataframe must have at least one column");
 	}
+	for (idx_t col_idx = 0; col_idx < names.size(); col_idx++) {
+		ColumnDefinition column(names[col_idx], return_types[col_idx]);
+		ArrowSchemaMetadata metadata(res->schema_root.arrow_schema.children[col_idx]->metadata);
+		column.SetComment(metadata.GetComment());
+		column.SetTags(metadata.GetTags());
+		res->columns.AddColumn(std::move(column));
+	}
 	return std::move(res);
+}
+
+static BindInfo ArrowScanGetBindInfo(const optional_ptr<FunctionData> bind_data_p) {
+	BindInfo info(ScanType::EXTERNAL);
+	info.columns = &bind_data_p->Cast<ArrowScanFunctionData>().columns;
+	return info;
 }
 
 unique_ptr<ArrowArrayStreamWrapper> ProduceArrowScan(const ArrowScanFunctionData &function,
@@ -329,6 +342,7 @@ void ArrowTableFunction::RegisterFunction(BuiltinFunctions &set) {
 	arrow.filter_prune = true;
 	arrow.supports_pushdown_type = ArrowPushdownType;
 	arrow.parallelism = TableFunctionParallelism::SEQUENTIAL;
+	arrow.get_bind_info = ArrowScanGetBindInfo;
 	set.AddFunction(arrow);
 
 	TableFunction arrow_dumb("arrow_scan_dumb", {}, ArrowScanFunction, ArrowScanBindDumb, ArrowScanInitGlobal,
@@ -339,6 +353,7 @@ void ArrowTableFunction::RegisterFunction(BuiltinFunctions &set) {
 	arrow_dumb.filter_pushdown = false;
 	arrow_dumb.filter_prune = false;
 	arrow_dumb.parallelism = TableFunctionParallelism::SEQUENTIAL;
+	arrow_dumb.get_bind_info = ArrowScanGetBindInfo;
 	set.AddFunction(arrow_dumb);
 }
 

@@ -11,8 +11,12 @@
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/enums/arrow_format_version.hpp"
+#include "duckdb/common/shared_ptr.hpp"
+#include "duckdb/common/vector.hpp"
 
 namespace duckdb {
+
+struct ColumnAnnotation;
 
 //! A set of properties from the client context that can be used to interpret the query result
 struct ClientProperties {
@@ -33,5 +37,7 @@ struct ClientProperties {
 	bool arrow_lossless_conversion = false;
 	ArrowFormatVersion arrow_output_version = ArrowFormatVersion::V1_0;
 	optional_ptr<ClientContext> client_context;
+	//! The comment and tags of the result columns, exported as Arrow field metadata
+	shared_ptr<const vector<ColumnAnnotation>> column_annotations;
 };
 } // namespace duckdb

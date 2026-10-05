@@ -17,6 +17,7 @@
 #include "duckdb/planner/bound_parameter_map.hpp"
 
 namespace duckdb {
+struct ColumnAnnotation;
 class CatalogEntry;
 class ClientContext;
 class PhysicalPlan;
@@ -41,6 +42,8 @@ public:
 
 	//! The statement properties
 	StatementProperties properties;
+	//! The comment and tags of the result columns, or nullptr if no column has any
+	shared_ptr<const vector<ColumnAnnotation>> column_annotations;
 
 	//! The map of parameter index to the actual value entry
 	bound_parameter_map_t value_map;

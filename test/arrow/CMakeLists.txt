@@ -3,6 +3,7 @@ add_library_unity(
   OBJECT
   arrow_test_helper.cpp
   arrow_roundtrip.cpp
+  arrow_column_metadata.cpp
   arrow_move_children.cpp
   arrow_filter_pushdown.cpp
   arrow_dictionary_sentinel.cpp
