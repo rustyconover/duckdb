@@ -57,6 +57,8 @@ public:
 	vector<Identifier> GetSimilarBindings(const Identifier &column_name);
 
 	optional_ptr<CTEBinding> GetCTEBinding(const BindingAlias &ctename);
+	//! Returns the CTE binding with the given index, if any
+	optional_ptr<CTEBinding> GetCTEBinding(TableIndex index);
 	//! Binds a column expression to the base table. Returns the bound expression
 	//! or throws an exception if the column could not be bound.
 	BindResult BindColumn(ColumnRefExpression &colref, idx_t depth);

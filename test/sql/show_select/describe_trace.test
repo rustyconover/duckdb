@@ -1,0 +1,178 @@
+# name: test/sql/show_select/describe_trace.test
+# description: DESCRIBE traces columns through CTEs, LATERAL joins and GROUP BY keys
+# group: [show_select]
+
+statement ok
+CREATE TABLE traced(i INTEGER PRIMARY KEY, j INTEGER DEFAULT 42, region VARCHAR);
+
+statement ok
+COMMENT ON COLUMN traced.i IS 'identifier';
+
+statement ok
+COMMENT ON COLUMN traced.region IS 'sales region';
+
+statement ok
+CREATE TABLE other(k INTEGER NOT NULL);
+
+# a WITH clause does not hide the columns that do not come from the CTE
+query IIII
+SELECT column_name, "key", "default", extra FROM (DESCRIBE WITH c AS (SELECT 1 AS x) SELECT i, j FROM traced, c);
+----
+i	PRI	NULL	{"comment":"identifier"}
+j	NULL	42	NULL
+
+# a CTE reference reads the columns of the CTE's query
+query IIII
+SELECT column_name, "key", "default", extra FROM (DESCRIBE WITH c AS (SELECT i, j FROM traced) SELECT i, j FROM c);
+----
+i	PRI	NULL	{"comment":"identifier"}
+j	NULL	42	NULL
+
+# CTE column aliases and chained CTEs
+query II
+SELECT column_name, extra FROM (DESCRIBE WITH c(x) AS (SELECT i FROM traced), d AS (SELECT x AS y FROM c) SELECT y FROM d);
+----
+y	{"comment":"identifier"}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE WITH c AS MATERIALIZED (SELECT i FROM traced) SELECT i FROM c);
+----
+i	{"comment":"identifier"}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE WITH c AS NOT MATERIALIZED (SELECT i FROM traced) SELECT i FROM c);
+----
+i	{"comment":"identifier"}
+
+# a CTE referenced twice
+query II
+SELECT column_name, extra FROM (DESCRIBE WITH c AS (SELECT i FROM traced) SELECT a.i AS a_i, b.i AS b_i FROM c a, c b);
+----
+a_i	{"comment":"identifier"}
+b_i	{"comment":"identifier"}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE WITH c AS (SELECT i, region FROM traced) SELECT * FROM c);
+----
+i	{"comment":"identifier"}
+region	{"comment":"sales region"}
+
+# a WITH clause inside a subquery
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT i FROM (WITH c AS (SELECT i FROM traced) SELECT i FROM c) s);
+----
+i	{"comment":"identifier"}
+
+# a CTE of a query that encloses the DESCRIBE
+query IIII
+WITH c AS (SELECT i, j FROM traced) SELECT column_name, "key", "default", extra FROM (DESCRIBE SELECT i, j FROM c);
+----
+i	PRI	NULL	{"comment":"identifier"}
+j	NULL	42	NULL
+
+query II
+WITH c AS MATERIALIZED (SELECT i FROM traced) SELECT column_name, extra FROM (DESCRIBE SELECT i FROM c);
+----
+i	{"comment":"identifier"}
+
+query II
+WITH c AS (SELECT i FROM traced), d AS (FROM (DESCRIBE SELECT i FROM c)) SELECT column_name, "key" FROM d;
+----
+i	PRI
+
+# a recursive CTE referencing itself inside a DESCRIBE
+query I
+WITH RECURSIVE r AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM r, (DESCRIBE SELECT n FROM r) d WHERE n < 2) SELECT n FROM r ORDER BY n;
+----
+1
+2
+
+# a computed CTE column is not traced
+query III
+SELECT column_name, "key", extra FROM (DESCRIBE WITH c AS (SELECT i + 1 AS i FROM traced) SELECT i FROM c);
+----
+i	NULL	NULL
+
+# a recursive CTE owns its columns
+query II
+SELECT column_name, extra FROM (DESCRIBE WITH RECURSIVE r AS (SELECT i FROM traced UNION ALL SELECT i + 1 FROM r WHERE i < 3) SELECT i FROM r);
+----
+i	NULL
+
+# a LATERAL join forwards the columns of its subquery
+query III
+SELECT column_name, "key", extra FROM (DESCRIBE SELECT o.k, l.i FROM other o, LATERAL (SELECT i FROM traced WHERE i = o.k) l);
+----
+k	NULL	NULL
+i	PRI	{"comment":"identifier"}
+
+# a correlated column of the outer query is not traced
+query III
+SELECT column_name, "key", extra FROM (DESCRIBE SELECT l.x FROM traced t, LATERAL (SELECT t.i AS x) l);
+----
+x	NULL	NULL
+
+# a LEFT LATERAL join forwards the columns of its subquery like a LEFT JOIN
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT l.i FROM other o LEFT JOIN LATERAL (SELECT i FROM traced WHERE i = o.k) l ON true);
+----
+i	{"comment":"identifier"}
+
+# a group key keeps the comment of the column it groups by, but not its constraints
+query IIII
+SELECT column_name, "null", "key", extra FROM (DESCRIBE SELECT i, count(*) AS n FROM traced GROUP BY i);
+----
+i	YES	NULL	{"comment":"identifier"}
+n	YES	NULL	NULL
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT region FROM traced GROUP BY ALL);
+----
+region	{"comment":"sales region"}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT region AS r FROM traced GROUP BY 1);
+----
+r	{"comment":"sales region"}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT region AS r FROM traced GROUP BY r);
+----
+r	{"comment":"sales region"}
+
+# a collation changes how the key compares, not its value
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT region COLLATE NOCASE AS r FROM traced GROUP BY region COLLATE NOCASE);
+----
+r	{"comment":"sales region"}
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT region, sum(j) AS total FROM traced GROUP BY ROLLUP (region));
+----
+region	{"comment":"sales region"}
+total	NULL
+
+# a computed group key is not traced
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT upper(region) AS r FROM traced GROUP BY upper(region));
+----
+r	NULL
+
+# a group key with a collation is selected through a first() aggregate
+statement ok
+SET default_collation='nocase';
+
+query II
+SELECT column_name, extra FROM (DESCRIBE SELECT region FROM traced GROUP BY region);
+----
+region	{"comment":"sales region"}
+
+statement ok
+RESET default_collation;
+
+# group keys inside a CTE
+query II
+SELECT column_name, extra FROM (DESCRIBE WITH g AS (SELECT region, count(*) AS n FROM traced GROUP BY region) SELECT region, n FROM g);
+----
+region	{"comment":"sales region"}
+n	NULL
